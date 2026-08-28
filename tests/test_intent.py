@@ -45,7 +45,7 @@ def test_the_digest_does_not_change_when_the_config_directory_changes(guardrails
     campaign digest differently from a different working directory, which defeats adoption
     and creates the duplicate campaign the determinism was supposed to prevent.
     """
-    laptop = make_campaign(guardrails=guardrails, source_dir="/Users/someone/dev/repo/config")
+    laptop = make_campaign(guardrails=guardrails, source_dir="/home/build-a/checkout/config")
     server = make_campaign(guardrails=guardrails, source_dir="/srv/deploy/current/config")
     assert laptop.source_dir != server.source_dir
     assert digest_of(laptop) == digest_of(server)
