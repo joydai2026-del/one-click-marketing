@@ -182,6 +182,58 @@ def test_a_confirmed_publish_is_recorded_in_the_log():
     assert log.entries()[0]["channel"] == "substack"
 
 
+def test_the_publisher_stamps_published_at_from_its_own_clock():
+    """THE CLOCK BELONGS TO THE PUBLISHER, NOT THE ADAPTER.
+
+    The durable log is WRITTEN by the publisher and READ by the schedule cap. If the
+    adapter stamps a wall-clock time while the cap is evaluated against a caller-injected
+    `now`, the two disagree, every confirmed post falls outside its own window,
+    `count_in_window` returns 0, and the one-post-per-window cap never fires at all. It
+    only appears to work when the injected clock happens to match the wall clock.
+    """
+    log = PostLog()
+    adapter = RecordingAdapter()
+    # The adapter deliberately reports a DIFFERENT instant, so a pass here cannot be an
+    # accident of the two clocks agreeing.
+    assert FIXED_NOW != FIXED_NOW + 999_999
+
+    record = Publisher(log=log).publish(adapter, make_draft(BODY), now=FIXED_NOW + 999_999)
+
+    assert record.published_at == FIXED_NOW + 999_999
+    assert log.entries()[0]["published_at"] == FIXED_NOW + 999_999
+
+
+def test_a_publish_with_no_clock_keeps_the_adapters_own_timestamp():
+    """`now` is optional, so a caller that has no simulated clock is unaffected."""
+    log = PostLog()
+    record = Publisher(log=log).publish(RecordingAdapter(), make_draft(BODY), now=None)
+    assert record.published_at == FIXED_NOW
+    assert log.entries()[0]["published_at"] == FIXED_NOW
+
+
+def test_the_publisher_clock_and_the_schedule_cap_read_the_same_log():
+    """The two halves joined up: publish at `now`, then ask the cap at the same `now`."""
+    log = PostLog()
+    policy = SchedulePolicy(max_per_window=1, window_hours=24)
+    simulated = FIXED_NOW + 10 * 86_400
+
+    assert policy.may_publish(log, "fake", now=simulated)[0] is True
+    Publisher(log=log).publish(RecordingAdapter(), make_draft(BODY), now=simulated)
+    assert policy.may_publish(log, "fake", now=simulated)[0] is False
+    assert policy.may_publish(log, "fake", now=simulated + 25 * 3600)[0] is True
+
+
+def test_a_refused_publish_stamps_nothing_because_it_records_nothing():
+    """The restamp happens after the external-id check, so an unfindable post leaves the
+    log untouched rather than leaving a correctly-timestamped phantom entry."""
+    log = PostLog()
+    with pytest.raises(GateError):
+        Publisher(log=log).publish(
+            RecordingAdapter(external_id=""), make_draft(BODY), now=FIXED_NOW
+        )
+    assert log.entries() == []
+
+
 # --------------------------------------------------------------------------------------
 # the post log
 # --------------------------------------------------------------------------------------

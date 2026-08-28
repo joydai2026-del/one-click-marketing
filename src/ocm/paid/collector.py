@@ -33,8 +33,12 @@ this module produces says "observed", never "caused".
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
+
+# Attribution-window keys: "7d_click", "1d_view", "28d_click", "7_day_click", and so on.
+_WINDOW_KEY = re.compile(r"^\d+(d|_day)_(click|view)$")
 
 
 def _int_or_none(row: dict[str, Any], key: str) -> int | None:
@@ -72,9 +76,14 @@ def extract_action(row: dict[str, Any], action_type: str) -> int | None:
             continue
         value = a.get("value")
         if value is None:
-            # Some responses key the value by attribution window instead.
-            for k, v in a.items():
-                if k.endswith("_day_click") or k.endswith("_day_view"):
+            # Some responses omit "value" and key the count by attribution window instead.
+            # Window keys are spelled inconsistently across platforms and API versions
+            # ("7d_click", "1d_view", "28d_click", and the longer "_day_click" form), so
+            # the match is on shape rather than on an enumerated list. Anything not
+            # recognized falls through to None: a wrong bucket read confidently is worse
+            # than an honest gap, because it produces a number that looks real.
+            for k, v in sorted(a.items()):
+                if _WINDOW_KEY.match(k):
                     value = v
                     break
         if value is None:

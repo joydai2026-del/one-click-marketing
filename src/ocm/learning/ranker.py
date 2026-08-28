@@ -16,12 +16,15 @@ The hard part is not computing a mean. It is being honest about when the mean me
 nothing. Three separate ways this ranker declines to produce a winner:
 
     insufficient_data   fewer than `min_samples` usable measurements
-    low_confidence      enough samples, but only one distinct tag value, or a tie
-    no separation       the top mean does not STRICTLY beat the runner-up
+    low_confidence      enough samples, but only ONE distinct tag value was ever tried,
+                        so nothing was compared against anything
+    no_separation       two or more values WERE compared and came out level: the top mean
+                        does not strictly beat the runner-up
 
 They are distinct states, not one "failed" flag, because they call for different responses:
-insufficient data means keep gathering, low confidence means the space needs more spread,
-and no separation means these two options are genuinely equivalent so far.
+insufficient data means keep gathering, low confidence means the rotation is not spreading
+across this axis, and no separation is itself a real finding, namely that these options are
+equivalent so far.
 
 Every one of them yields `winner=None`, and every consumer of a `Learnings` refuses to
 tilt on a None winner. That is what stops the loop from converging on noise, which is the
@@ -163,15 +166,17 @@ class Ranker:
         (top_val, top_mean), (_, second_mean) = ordered[0], ordered[1]
 
         if top_mean - second_mean <= MIN_SEPARATION:
-            # A tie at the top. Naming either side would be a coin flip presented as a
-            # finding, and the loop would then chase it for every future round.
+            # A tie at the top. Distinct from `low_confidence`: here two or more values
+            # WERE genuinely compared and came out level, which is a real finding ("these
+            # options are equivalent so far"), whereas low_confidence means nothing was
+            # compared to anything. Naming either side would be a coin flip presented as
+            # a finding, and the loop would then chase it for every future round.
             return Learnings(
                 channel=channel,
                 dimension=dimension,
                 winner=None,
                 means=means,
                 sample_count=len(usable),
-                low_confidence=True,
             )
 
         return Learnings(

@@ -171,10 +171,12 @@ responses:
 | Status | Meaning | What to do |
 |---|---|---|
 | `insufficient_data` | fewer than `min_samples` measurements | keep gathering |
-| `low_confidence` | one distinct value, or an exact tie at the top | the space needs more spread |
-| `no_separation` | the top mean does not strictly beat the runner-up | these options are equivalent so far |
+| `low_confidence` | only one distinct value was ever tried, so nothing was compared against anything | the rotation is not spreading across this axis |
+| `no_separation` | two or more values were compared and came out level | these options are equivalent so far |
 
-All three yield `winner=None`, and every consumer refuses to tilt on a `None` winner.
+All three yield `winner=None`, and every consumer refuses to tilt on a `None` winner. A
+test asserts all three are actually reachable, because a status the code can never produce
+is documentation of a decision it does not make.
 
 **Absent is not zero.** A published item with no measurement yet is *dropped* from the
 sample, never scored `0.0`. Treating "not measured" as "measured badly" teaches the loop to
@@ -193,9 +195,21 @@ time**, so two of its three values are never explored at all. Nobody notices, be
 loop still looks busy.
 
 So the schedule is derived from the axis lengths: the cycle is their lowest common multiple,
-and the stride is the smallest step **coprime** with that cycle. Coprimality guarantees the
-stride walks the entire cycle before repeating. Add a value to any axis and the schedule
-recomputes itself. There is a property test asserting every value of every axis gets covered.
+and the stride is the smallest step **above 1** that is **coprime** with that cycle. Two
+properties come out of that, and they are different:
+
+- **Coverage.** Each axis length divides the cycle, so a stride coprime with the cycle is
+  coprime with each axis length, which means it generates that axis's whole value set.
+  Reserving at least `max(axis_length)` positions therefore reaches every value of every
+  axis.
+- **Interleaving.** The search starts at 2, not 1. A stride of 1 is trivially coprime with
+  everything, so starting at 1 would return 1 for every cycle, the coprimality test would
+  never constrain anything, and the reserved positions would collapse to the contiguous
+  prefix `[0, want)`. Coverage would still hold, so nothing would look broken, but the loop
+  would explore in one burn-in block and then exploit for the rest of the cycle.
+
+Add a value to any axis and the schedule recomputes itself. A property test walks nine axis
+combinations, including the resonance trap, and asserts every value of every axis is covered.
 
 ### 7. Per-channel normalization, because raw engagement is not comparable
 

@@ -116,13 +116,29 @@ def test_extract_action_falls_back_to_an_attribution_window_keyed_value(key):
     assert extract_action(row(actions=[{"action_type": "purchase", key: "5"}]), "purchase") == 5
 
 
-def test_an_unrecognized_window_key_spelling_reads_as_unknown_rather_than_as_a_guess():
-    """The recognized spellings are `*_day_click` and `*_day_view`. Anything else, such as
-    a compact `7d_click`, yields None. Fail-closed is the right direction: a wrong number
-    here is untraceable, while a None is visible all the way to the ranker, which drops it.
+@pytest.mark.parametrize("key", ["7d_click", "1d_view", "28d_click", "7_day_click"])
+def test_attribution_window_keys_are_matched_on_shape_across_spellings(key):
+    """Window keys are spelled inconsistently across platforms and API versions, so the
+    match is on shape rather than on an enumerated list of spellings.
     """
-    compact = row(actions=[{"action_type": "purchase", "7d_click": "5"}])
-    assert extract_action(compact, "purchase") is None
+    assert extract_action(row(actions=[{"action_type": "purchase", key: "5"}]), "purchase") == 5
+
+
+@pytest.mark.parametrize("key", ["clicks", "d_click", "7d_", "value_7d", "7dclick", "d7_click"])
+def test_an_unrecognized_key_reads_as_unknown_rather_than_as_a_guess(key):
+    """Fail-closed is the right direction: a wrong number here is untraceable, while a
+    None is visible all the way to the ranker, which drops it rather than scoring it 0.
+    """
+    assert extract_action(row(actions=[{"action_type": "purchase", key: "5"}]), "purchase") is None
+
+
+def test_window_key_selection_is_deterministic_when_several_are_present():
+    """A response carrying more than one window must not resolve differently run to run,
+    or the same campaign silently changes its numbers between collections."""
+    action = {"action_type": "purchase", "7d_click": "9", "1d_view": "3", "28d_click": "12"}
+    first = extract_action(row(actions=[dict(action)]), "purchase")
+    second = extract_action(row(actions=[dict(reversed(list(action.items())))]), "purchase")
+    assert first == second
 
 
 def test_a_genuine_zero_action_count_stays_zero():

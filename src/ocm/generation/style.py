@@ -158,15 +158,32 @@ class StyleSpace:
 
 
 def _smallest_coprime_stride(cycle: int) -> int:
-    """Smallest stride > 0 that is coprime with `cycle`.
+    """Smallest stride greater than 1 that is coprime with `cycle`.
 
-    Coprimality is the whole point: a stride sharing a factor with the cycle visits only
-    a subset of positions no matter how many steps you take, which is precisely the
-    starvation bug this module exists to avoid.
+    TWO PROPERTIES ARE NEEDED, AND THEY ARE DIFFERENT
+
+    COVERAGE. Every value of every axis must eventually be explored. Because `cycle` is
+    the lowest common multiple of the axis lengths, each `len_i` divides `cycle`; and
+    because `stride` is coprime with `cycle`, it is also coprime with each `len_i`, so
+    `stride mod len_i` generates the whole of Z_len_i. Walking `want` steps therefore
+    covers every value of an axis whenever `want >= len_i`, which `exploration_positions`
+    guarantees by flooring `want` at the longest axis.
+
+    INTERLEAVING. Exploration should be spread through the cycle rather than bunched at
+    its start. This is why the search begins at 2 rather than at 1. A stride of 1 is
+    trivially coprime with everything, so starting at 1 would return 1 for every cycle,
+    the coprimality test would never actually constrain anything, and the reserved
+    positions would collapse to the contiguous prefix [0, want). That still covers every
+    axis, so nothing would look broken, but the loop would explore in one burn-in block
+    and then exploit for the rest of the cycle, which is a materially worse schedule and
+    would make the word "coprime" in this module decorative.
+
+    Cycles of 1 and 2 have no coprime stride above 1, so they return 1. At those sizes
+    the distinction is meaningless: the prefix is the whole cycle.
     """
-    if cycle <= 1:
+    if cycle <= 2:
         return 1
-    for s in range(1, cycle):
+    for s in range(2, cycle):
         if gcd(s, cycle) == 1:
             return s
-    return 1  # pragma: no cover - unreachable for cycle > 1
+    return 1  # pragma: no cover - unreachable for cycle > 2

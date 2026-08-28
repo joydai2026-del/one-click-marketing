@@ -53,9 +53,15 @@ def test_low_confidence_when_every_sample_used_the_same_tag_value():
     assert set(learn.means) == {"question"}
 
 
-def test_low_confidence_on_an_exact_tie_at_the_top():
-    """Naming either side would be a coin flip presented as a finding, and the loop would
-    then chase it for every future round."""
+def test_no_separation_on_an_exact_tie_at_the_top():
+    """A tie is NOT low confidence: two values were genuinely compared and came out level,
+    which is a real finding. Naming either side would be a coin flip presented as a
+    finding, and the loop would then chase it for every future round.
+
+    The distinction is load-bearing because the two states call for different responses.
+    `low_confidence` says the rotation is not spreading across this axis. `no_separation`
+    says it is spreading fine and these options are equivalent so far.
+    """
     learn = rank(
         [
             sample("question", 0.8, vid="a"),
@@ -63,8 +69,10 @@ def test_low_confidence_on_an_exact_tie_at_the_top():
             sample("number", 0.1, vid="c"),
         ]
     )
-    assert learn.status == "low_confidence"
+    assert learn.status == "no_separation"
     assert learn.winner is None
+    assert not learn.low_confidence
+    assert not learn.insufficient_data
 
 
 def test_a_tie_within_floating_point_noise_is_still_a_tie():
@@ -77,7 +85,35 @@ def test_a_tie_within_floating_point_noise_is_still_a_tie():
         ]
     )
     assert learn.winner is None
-    assert learn.status == "low_confidence"
+    assert learn.status == "no_separation"
+
+
+def test_all_three_no_winner_states_are_reachable():
+    """Guards against a refactor collapsing one of the three states into another.
+
+    A status that can never be produced is documentation of a decision the code does not
+    actually make, which is exactly the kind of claim this repository must not ship.
+    """
+    insufficient = rank([sample("question", 0.9)], min_samples=5)
+    single_value = rank([sample("question", s) for s in (0.9, 0.8, 0.7)])
+    tie = rank(
+        [
+            sample("question", 0.8, vid="a"),
+            sample("story", 0.8, vid="b"),
+            sample("number", 0.1, vid="c"),
+        ]
+    )
+    winner = rank(
+        [
+            sample("question", 0.9, vid="a"),
+            sample("story", 0.2, vid="b"),
+            sample("number", 0.1, vid="c"),
+        ]
+    )
+    assert insufficient.status == "insufficient_data"
+    assert single_value.status == "low_confidence"
+    assert tie.status == "no_separation"
+    assert winner.status == "winner"
 
 
 def test_a_real_winner_when_one_value_strictly_beats_the_runner_up():

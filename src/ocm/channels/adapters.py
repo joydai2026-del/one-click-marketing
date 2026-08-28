@@ -2,7 +2,8 @@
 
 They are examples in the strict sense: they demonstrate the interface and the per-channel
 normalization idea against two platforms with genuinely different economics. Neither talks
-to a real API here. Both are configured entirely from `config/example/channels.toml`.
+to a real API here. Both are configured entirely from the `[[channels]]` tables in
+`config/example/organic.toml`.
 
 The interesting difference is `normalize`:
 
