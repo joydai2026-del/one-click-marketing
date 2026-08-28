@@ -300,7 +300,14 @@ def cmd_paid(args) -> int:
     print("   never destroys the evidence of what was known at decision time.")
     unknown = sum(1 for r in store.latest_effective() if r.purchases is None)
     print(f"   readings with purchases UNKNOWN (None, not 0): {unknown}")
-    print(f"   total spend across current readings: {store.total_spend_minor()} minor units")
+    total = store.total_spend_minor()
+    known, unreadable = store.known_spend_minor()
+    if total is None:
+        print(f"   total spend: UNKNOWN ({unreadable} unreadable reading(s)); "
+              f"{known} minor units are readable, but a partial sum is not a total and a")
+        print("   budget guard comparing one against a ceiling would let the campaign run past it")
+    else:
+        print(f"   total spend across current readings: {total} minor units (fully known)")
 
     non_get = [r for r in platform.requests if r[0] != "GET"]
     print(f"\n   platform requests: {len(platform.requests)} total, "

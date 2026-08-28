@@ -37,9 +37,24 @@ from datetime import datetime, timezone
 
 from .campaign import Campaign
 
-# Field separator that cannot appear in any of the values being joined, so that no
-# combination of field contents can be re-parsed as a different combination.
-_SEP = "\x1f"
+def _framed(*fields: str) -> bytes:
+    """Length-prefix every field before hashing.
+
+    A SEPARATOR IS NOT ENOUGH. This used to join fields with \x1f on the assumption that
+    the character could not appear in a value. Nothing enforced that assumption, and a
+    field containing the separator lets two materially different campaigns produce one
+    digest: ("a\x1fb", "c") and ("a", "b\x1fc") join to identical bytes. On a spend gate,
+    a digest collision means an approval for one campaign authorizing another.
+
+    Length-prefixing removes the assumption instead of restating it. No field content can
+    imitate a field boundary, because the boundary is carried by a count rather than by a
+    byte that might also be data.
+    """
+    out = bytearray()
+    for f in fields:
+        raw = f.encode("utf-8")
+        out += str(len(raw)).encode("ascii") + b":" + raw
+    return bytes(out)
 
 
 def canonical_instant(dt: datetime) -> str:
@@ -62,8 +77,8 @@ def intent_digest(
     if ends_at <= starts_at:
         raise ValueError("ends_at must be after starts_at")
     g = campaign.guardrails
-    material = _SEP.join(
-        [
+    material = _framed(
+        *[
             campaign.campaign_id,
             campaign.objective,
             campaign.optimization_event,
@@ -80,7 +95,7 @@ def intent_digest(
             ",".join(sorted(c.content_hash for c in campaign.creatives)),
         ]
     )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+    return hashlib.sha256(material).hexdigest()[:32]
 
 
 def render_review_card(

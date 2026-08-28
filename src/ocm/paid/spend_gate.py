@@ -35,9 +35,9 @@ from typing import Any
 
 from ..approval.errors import ApprovalError
 from ..approval.ledger import NonceLedger
-from ..approval.tokens import ApprovalToken, verify_and_consume
+from ..approval.tokens import ApprovalToken, verify
 from .campaign import Campaign
-from .creative import CreativeRead
+from .creative import CreativeRead, hash_bytes
 from .platform import CampaignState
 
 _MINT = object()
@@ -97,17 +97,25 @@ def authorize(
     """
     reasons: list[str] = []
 
-    # 1. The signed token. Signature, expiry, scope, content binding, spend ceiling, and
-    #    single use, in that order. This raises rather than accumulating, because a bad
-    #    signature makes every other field in the token meaningless to report on.
+    # 1. The signed token: signature, expiry, scope, content binding, subject, ceiling.
+    #    This raises rather than accumulating, because a bad signature makes every other
+    #    field in the token meaningless to report on.
+    #
+    #    NOTE THAT THE NONCE IS NOT CONSUMED HERE. `verify` deliberately stops short of
+    #    burning it, so that a transient live-state mismatch below does not destroy a
+    #    perfectly good human approval and force a person to issue a new one. The nonce is
+    #    consumed at the very end, once this function is certain it will return a grant.
     try:
-        verified = verify_and_consume(
+        verified = verify(
             token=token,
             signature=signature,
             key=key,
             expected_scope=f"spend:{campaign.campaign_id}",
             expected_content_hash=expected_intent_digest,
-            ledger=ledger,
+            # Subject is deliberately NOT passed here. `verify` short-circuits, and the
+            # subject is a live-state comparison like budget and currency, so it belongs
+            # in the accumulating section below where it can be reported alongside every
+            # other mismatch instead of hiding them.
             intended_spend_minor=intended_spend_minor,
             now=now,
         )
@@ -130,6 +138,17 @@ def authorize(
             "live campaign's intent digest differs from the approved intent: the campaign "
             "on the platform is not the one that was reviewed"
         )
+    # A campaign that is already delivering is not a campaign awaiting authorization to
+    # spend. Authorizing one is authorizing money that is already moving, which is a
+    # rubber stamp on a decision nobody made. Only PAUSED is acceptable here, and this
+    # codebase has no way to leave PAUSED, so reaching this branch means something changed
+    # the campaign outside the system.
+    if live_state.status != "PAUSED":
+        reasons.append(
+            f"live campaign status is {live_state.status!r}, not 'PAUSED': refusing to "
+            f"authorize spend on a campaign that is not awaiting authorization"
+        )
+
     g = campaign.guardrails
     if live_state.lifetime_budget_minor != g.lifetime_budget_minor:
         reasons.append(
@@ -159,18 +178,45 @@ def authorize(
         )
 
     # 3. The creatives must still be the approved bytes.
+    #
+    #    The gate re-hashes the PAYLOAD rather than trusting the reader's `ok` flag. A
+    #    CreativeRead is an ordinary object a caller constructs, so believing its self
+    #    report would make the last line of defense depend on the honesty of the thing it
+    #    is defending against. The hash is recomputed here, from the bytes, every time.
     bad = [f"{r.ref}: {r.error}" for r in creative_reads if not r.ok]
     if bad:
         reasons.append("creative(s) no longer match what was approved: " + "; ".join(bad))
-    approved_hashes = {c.content_hash for c in campaign.creatives}
-    read_hashes = {r.approved_hash for r in creative_reads}
-    if approved_hashes != read_hashes:
+
+    for r in creative_reads:
+        if r.payload is None:
+            continue
+        if hash_bytes(r.payload) != r.approved_hash:
+            reasons.append(
+                f"{r.ref}: the bytes presented to the gate do not hash to the approved "
+                f"value"
+            )
+
+    # Compared REF BY REF, not as sets of hashes. Two creatives sharing a hash would
+    # collapse a set comparison, so a campaign could present one asset twice and satisfy a
+    # two-asset approval.
+    approved = sorted((c.ref, c.content_hash) for c in campaign.creatives)
+    presented = sorted((r.ref, r.approved_hash) for r in creative_reads)
+    if approved != presented:
         reasons.append(
-            "the set of creatives read does not match the set in the approved campaign"
+            "the creatives presented do not match, one for one, the creatives in the "
+            "approved campaign"
         )
 
     if reasons:
         raise SpendRefused(reasons)
+
+    # Every check has passed and this call is now certain to return a grant, so the
+    # approval is spent. Consuming here rather than during verification is what stops a
+    # transient mismatch from burning a valid human approval.
+    try:
+        ledger.consume(verified.nonce)
+    except ApprovalError as exc:
+        raise SpendRefused([str(exc)]) from exc
 
     return SpendGrant(
         _mint=_MINT,

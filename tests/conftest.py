@@ -7,6 +7,8 @@ stops being evidence about the code and starts being evidence about the machine.
 
 from __future__ import annotations
 
+import hashlib
+
 from pathlib import Path
 
 import pytest
@@ -167,6 +169,19 @@ def guardrails() -> Guardrails:
     )
 
 
+# Real bytes and their REAL hashes. The spend gate re-hashes the payload it is handed
+# rather than trusting a CreativeRead's self-report, so a fixture whose declared hash does
+# not match its bytes is now correctly refused. These have to agree.
+CREATIVE_PAYLOADS = {
+    "a.txt": b"fabricated creative a",
+    "b.txt": b"fabricated creative b",
+}
+CREATIVE_HASHES = {
+    ref: hashlib.sha256(payload).hexdigest()
+    for ref, payload in CREATIVE_PAYLOADS.items()
+}
+
+
 def make_campaign(
     *,
     guardrails: Guardrails,
@@ -187,8 +202,8 @@ def make_campaign(
         languages=("en",),
         creatives=creatives
         or (
-            CreativeRef(ref="a.txt", content_hash="a" * 64),
-            CreativeRef(ref="b.txt", content_hash="b" * 64),
+            CreativeRef(ref="a.txt", content_hash=CREATIVE_HASHES["a.txt"]),
+            CreativeRef(ref="b.txt", content_hash=CREATIVE_HASHES["b.txt"]),
         ),
         guardrails=guardrails,
         source_dir=source_dir,

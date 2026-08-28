@@ -27,16 +27,35 @@ import unicodedata
 from dataclasses import dataclass, field
 
 # Characters that render as nothing but break naive substring matching.
-_INVISIBLE = dict.fromkeys(
-    [
-        0x00AD,  # soft hyphen
-        0x200B,  # zero width space
-        0x200C,  # zero width non-joiner
-        0x200D,  # zero width joiner
-        0x2060,  # word joiner
-        0xFEFF,  # zero width no-break space
-    ]
+#
+# ENUMERATING THEM BY HAND DOES NOT WORK. This started as a list of six well-known
+# offenders and was evaded by U+200E LEFT-TO-RIGHT MARK, which was simply not on it. Any
+# hand-written list is a list of the invisible characters someone happened to think of,
+# and the attacker only has to find one that was forgotten.
+#
+# So the rule is CATEGORICAL: strip every character Unicode itself classifies as a format
+# character (category Cf) or a control character (Cc), plus the handful of spacing marks
+# that render as nothing. That covers the zero-widths, the bidi marks, the soft hyphen,
+# and anything added to the standard in future, without needing to know their names.
+_STRIP_CATEGORIES = frozenset({"Cf", "Cc"})
+_EXTRA_INVISIBLE = frozenset(
+    {
+        0x00AD,  # soft hyphen (category Pd, so not caught by the rule above)
+        0x115F,  # hangul choseong filler
+        0x1160,  # hangul jungseong filler
+        0x3164,  # hangul filler
+        0xFFA0,  # halfwidth hangul filler
+    }
 )
+
+
+def _strip_invisible(text: str) -> str:
+    return "".join(
+        ch
+        for ch in text
+        if ord(ch) not in _EXTRA_INVISIBLE
+        and unicodedata.category(ch) not in _STRIP_CATEGORIES
+    )
 
 _LINK_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
@@ -48,7 +67,7 @@ def normalize(text: str) -> str:
     all runs of whitespace to a single space.
     """
     text = unicodedata.normalize("NFKC", text)
-    text = text.translate(_INVISIBLE)
+    text = _strip_invisible(text)
     text = text.lower()
     return re.sub(r"\s+", " ", text).strip()
 

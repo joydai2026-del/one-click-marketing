@@ -430,15 +430,26 @@ def test_total_spend_sums_only_the_current_readings():
     assert store.total_spend_minor() == 300
 
 
-def test_total_spend_ignores_unknown_readings_without_treating_them_as_zero():
+def test_a_partially_unknown_total_spend_is_None_not_a_partial_sum():
+    """Summing the readable rows and calling it a total is missing-is-not-zero one level up.
+
+    It silently UNDERSTATES spend, and it understates it to the one caller whose job is to
+    stop at a ceiling. A budget guard comparing a partial sum against a limit lets the
+    campaign run past it. `known_spend_minor` exists for reporting, where the caller can be
+    told plainly that the figure is incomplete.
+    """
     store = SnapshotStore()
-    store.append(
-        [
-            snapshot(platform_ad_id="ad-1", spend_minor=100),
-            snapshot(platform_ad_id="ad-2", spend_minor=None),
-        ]
-    )
-    assert store.total_spend_minor() == 100
+    store.append([snapshot(platform_ad_id="ad-1", spend_minor=1000), snapshot(platform_ad_id="ad-2", spend_minor=None)])
+
+    assert store.total_spend_minor() is None
+    assert store.known_spend_minor() == (1000, 1)
+
+
+def test_a_fully_known_total_spend_is_the_sum():
+    store = SnapshotStore()
+    store.append([snapshot(platform_ad_id="ad-1", spend_minor=1000), snapshot(platform_ad_id="ad-2", spend_minor=250)])
+    assert store.total_spend_minor() == 1250
+    assert store.known_spend_minor() == (1250, 0)
 
 
 # --------------------------------------------------------------------------------------

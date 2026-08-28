@@ -206,6 +206,16 @@ class SchedulePolicy:
     max_per_window: int = 1
     window_hours: int = 24
 
+    def __post_init__(self) -> None:
+        # A zero or negative window makes the cutoff equal to or later than `now`, so no
+        # post is ever inside the window, `count_in_window` always returns 0, and the cap
+        # silently permits unlimited posting. A cap that turns itself off when misconfigured
+        # is worse than no cap, because the config still says the limit is one.
+        if self.window_hours <= 0:
+            raise ValueError("window_hours must be positive")
+        if self.max_per_window < 0:
+            raise ValueError("max_per_window must be non-negative")
+
     @classmethod
     def from_config(cls, cfg: dict) -> SchedulePolicy:
         return cls(

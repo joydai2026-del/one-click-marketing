@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-from conftest import make_campaign
+from conftest import CREATIVE_PAYLOADS, make_campaign
 
 from ocm.approval.ledger import InMemoryLedger
 from ocm.approval.tokens import issue
@@ -50,8 +50,15 @@ def live_state(guardrails) -> CampaignState:
 
 @pytest.fixture
 def creative_reads(campaign) -> list[CreativeRead]:
+    """Reads whose payloads genuinely hash to their declared approved hash.
+
+    They have to, because the gate re-hashes the payload rather than trusting the read's
+    own `ok` flag: a CreativeRead is an ordinary object a caller constructs, so believing
+    its self-report would make the last line of defense depend on the honesty of the thing
+    it defends against.
+    """
     return [
-        CreativeRead(c.ref, c.content_hash, None, None, b"approved bytes")
+        CreativeRead(c.ref, c.content_hash, None, None, CREATIVE_PAYLOADS[c.ref])
         for c in campaign.creatives
     ]
 
@@ -234,7 +241,7 @@ def test_a_creative_set_that_differs_from_the_approved_set_refuses(
     swapped = [CreativeRead("z.txt", "z" * 64, None, None, b"bytes")]
     with pytest.raises(SpendRefused) as exc:
         run(campaign, token_and_sig, ledger, live_state, creative_reads=swapped)
-    assert any("set of creatives read does not match" in r for r in exc.value.reasons)
+    assert any("do not match, one for one" in r for r in exc.value.reasons)
 
 
 # --------------------------------------------------------------------------------------
@@ -391,7 +398,7 @@ def test_a_campaign_creative_set_and_read_set_must_agree_by_hash_not_by_count(
     ]
     with pytest.raises(SpendRefused) as exc:
         run(campaign, token_and_sig, ledger, live_state, creative_reads=right_count_wrong_assets)
-    assert any("set of creatives read does not match" in r for r in exc.value.reasons)
+    assert any("do not match, one for one" in r for r in exc.value.reasons)
 
 
 def test_a_reordered_creative_read_list_is_still_accepted(
@@ -484,3 +491,90 @@ def test_both_flight_mismatches_are_reported_together(
             expected_ends_at="2099-12-31T00:00:00+00:00",
         )
     assert len(exc.value.reasons) >= 2
+
+
+# --------------------------------------------------------------------------------------
+# hardening found by adversarial review
+# --------------------------------------------------------------------------------------
+
+
+def test_a_live_campaign_that_is_not_paused_refuses(
+    campaign, token_and_sig, ledger, live_state, creative_reads
+):
+    """A campaign already delivering is not one awaiting authorization to spend.
+
+    Authorizing it rubber-stamps money that is already moving. This codebase has no way to
+    leave PAUSED, so reaching this state means something changed the campaign outside the
+    system, which is precisely when the gate should refuse.
+    """
+    active = dataclasses.replace(live_state, status="ACTIVE")
+    with pytest.raises(SpendRefused) as exc:
+        run(campaign, token_and_sig, ledger, active, creative_reads)
+    assert any("not 'PAUSED'" in r for r in exc.value.reasons)
+
+
+def test_a_fabricated_creative_read_is_refused(
+    campaign, token_and_sig, ledger, live_state
+):
+    """The gate re-hashes the payload rather than trusting the read's own report.
+
+    A CreativeRead is an ordinary object a caller constructs. Believing its `ok` flag would
+    make the last line of defense depend on the honesty of the thing it defends against.
+    """
+    lying = [
+        CreativeRead(c.ref, c.content_hash, None, None, b"completely different bytes")
+        for c in campaign.creatives
+    ]
+    with pytest.raises(SpendRefused) as exc:
+        run(campaign, token_and_sig, ledger, live_state, lying)
+    assert any("do not hash to the approved value" in r for r in exc.value.reasons)
+
+
+def test_one_asset_presented_twice_cannot_satisfy_a_two_asset_approval(
+    campaign, token_and_sig, ledger, live_state
+):
+    """Compared ref by ref, not as sets. A set comparison collapses duplicates."""
+    first = campaign.creatives[0]
+    doubled = [
+        CreativeRead(first.ref, first.content_hash, None, None, CREATIVE_PAYLOADS[first.ref])
+    ] * 2
+    with pytest.raises(SpendRefused) as exc:
+        run(campaign, token_and_sig, ledger, live_state, doubled)
+    assert any("one for one" in r for r in exc.value.reasons)
+
+
+def test_a_zero_or_negative_intended_spend_is_refused(
+    campaign, token_and_sig, ledger, live_state, creative_reads
+):
+    for amount in (0, -1):
+        with pytest.raises(SpendRefused):
+            run(
+                campaign,
+                token_and_sig,
+                InMemoryLedger(),
+                live_state,
+                creative_reads,
+                intended_spend_minor=amount,
+            )
+
+
+def test_a_live_state_mismatch_does_not_burn_the_approval(
+    campaign, token_and_sig, ledger, live_state, creative_reads
+):
+    """THE ORDERING GUARANTEE, on the spend side.
+
+    The nonce is consumed only once the gate is certain it will return a grant. A transient
+    platform mismatch must not destroy a valid human approval and force a person to issue a
+    new one. Previously the nonce was burned during verification, before any live check ran.
+    """
+    token, _ = token_and_sig
+    mismatched = dataclasses.replace(live_state, currency="EUR")
+
+    with pytest.raises(SpendRefused):
+        run(campaign, token_and_sig, ledger, mismatched, creative_reads)
+    assert not ledger.seen(token.nonce), "a refused spend burned the approval"
+
+    # The very same approval still works once the platform state is correct again.
+    grant = run(campaign, token_and_sig, ledger, live_state, creative_reads)
+    assert grant.platform_campaign_id == PLATFORM_ID
+    assert ledger.seen(token.nonce), "a granted spend must burn the approval"

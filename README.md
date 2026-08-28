@@ -10,8 +10,9 @@ implemented and tested end to end. The review *surface* a person would use (a co
 chat, a web form) is out of scope here: this repository is the engine behind it, and a
 supplied signed token stands in for the click.
 
-Everything here runs offline. There is no network client in this repository, no credential
-is read, nothing publishes, and no money can move.
+Everything here runs offline. **This repository ships no network client**, every transport
+is a stub, no command reads a platform credential, and nothing it can do publishes content or
+moves money.
 
 ```bash
 git clone https://github.com/joydai2026-del/one-click-marketing
@@ -128,6 +129,16 @@ ever disagree.
 
 - **An empty live digest refuses.** It does not pass. A campaign this system cannot prove
   anything about resolves to no.
+- **A live status that is not `PAUSED` refuses.** A campaign already delivering is not one
+  awaiting authorization; approving it rubber-stamps money that is already moving.
+- **The creatives are re-hashed here, from their bytes.** A `CreativeRead` is an ordinary
+  object a caller constructs, so trusting its own "I'm fine" flag would make the last line
+  of defense depend on the honesty of what it defends against. They are also compared ref by
+  ref rather than as a set of hashes, so one asset presented twice cannot satisfy a
+  two-asset approval.
+- **The nonce is burned last, after the live checks too.** Verification stops short of
+  consuming it, so a transient platform mismatch refuses without destroying a valid human
+  approval and forcing a person to re-issue it.
 - **All mismatches are reported together.** Raising on the first one turns a five-field
   problem into five review cycles.
 - **The result is a capability, not a boolean.** `authorize` returns a frozen `SpendGrant`
@@ -145,8 +156,14 @@ attempt's campaign becomes unfindable, and the retry creates a **second real cam
 spending real money**. A deterministic digest lets the retry *adopt* what the first attempt
 may have created. Determinism here is a double-spend control, not a convenience.
 
-Which is why the digest covers everything that changes what is bought (budget, flight,
-geo, sorted creative hashes) and deliberately **excludes the config file's directory path**.
+Fields are **length-prefixed** before hashing rather than joined with a separator. A
+separator only works if no field can contain it, and nothing enforced that: `("a\x1fb", "c")`
+and `("a", "b\x1fc")` join to identical bytes, and on a spend gate a digest collision means
+an approval for one campaign authorizing another. A length prefix removes the assumption
+instead of restating it.
+
+The digest covers everything that changes what is bought (budget, flight, geo, sorted
+creative hashes) and deliberately **excludes the config file's directory path**.
 Including it would make the same campaign digest differently from two checkouts, recreating
 the exact duplicate-campaign bug the determinism exists to prevent. Timestamps are
 canonicalized to UTC and truncated to the minute for the same reason.
@@ -259,7 +276,11 @@ it must not let good writing offset an invented statistic or a missing disclosur
 
 The compliance floor includes a **configurable forbidden-substring check**, matched after
 NFKC folding, invisible-character stripping, and whitespace collapse, so cosmetic evasion
-does not work. Violations are reported **by index rather than by value**, because the term
+does not work. The stripping is *categorical*: everything Unicode itself classifies as a
+format or control character, not a hand-written list. That list started with six well-known
+offenders and was evaded by U+200E LEFT-TO-RIGHT MARK, which was simply not on it. Any
+enumeration is a list of the characters someone happened to think of, and the attacker only
+has to find the one that was forgotten. Violations are reported **by index rather than by value**, because the term
 list is the sensitive artifact and an audit log is a wider surface than a config file. The
 term list is necessarily stated in the generation instruction (you cannot ask a model to avoid
 something without naming it), but it is **masked out of the "avoid repeating these" block**
@@ -323,6 +344,13 @@ destroys the record of what you knew when you made the decision. So every collec
 a snapshot, and the current value is resolved by a latest-effective query keyed on
 (ad, day, attribution window), newest source timestamp winning. A late-arriving *older*
 restatement does not win.
+
+**A partially known total is reported as unknown.** If any reading is missing,
+`total_spend_minor()` returns `None` rather than the sum of the readable rows. Summing what
+you can see and calling it a total is missing-is-not-zero one level up: it *understates*
+spend, to the one caller whose job is to stop at a ceiling. `known_spend_minor()` returns the
+partial figure plus a count of unreadable rows, for reporting where "incomplete" can be said
+out loud.
 
 Four more rules, each from a real failure mode:
 
@@ -493,9 +521,38 @@ floors at random and print "factual grounding below floor" about text nothing ev
 A constant says plainly that no quality judgment was made. Everything *around* the score is
 real and tested: the weighting, the floors, the threshold, and the short-circuit ordering.
 
-The dry-run is **not a mode that could be flipped**. There is no `--live` flag and no
-credential path. `tests/test_dryrun_truth.py` asserts mechanically that no module in `src/`
-imports `requests`, `httpx`, `urllib.request`, `socket`, or `http.client`.
+The dry-run is **not a mode that could be flipped**. There is no `--live` flag, no command
+reads a platform credential, and `LiveTransport.send` raises. `tests/test_dryrun_truth.py`
+asserts mechanically that no module in `src/` imports `requests`, `httpx`, `urllib.request`,
+`socket`, or `http.client`, that every record the loop produces is marked `dry_run`, and that
+the platform stub refuses any status other than `PAUSED` or `ARCHIVED`.
+
+Stated precisely, because the difference matters: the claim is that **nothing in this
+repository reaches a network**, not that no future code could. The transport seam exists so a
+real client can be injected, which is the point of the design. What is guaranteed is that
+none ships here, none is reachable from any `ocm` command, and the test suite fails if one is
+added. The one environment variable read anywhere is `OCM_APPROVAL_KEY`, which is this
+system's own signing key and not a credential for any external service.
+
+### Scope boundary: single process, single operator
+
+This is a reference implementation of the mechanisms, not a distributed system, and the line
+matters because several of the guarantees above are stated at process scope:
+
+- **Concurrency.** The JSONL post log has no atomic reservation, so two processes running the
+  same channel could both write an intent and both publish. Single-use approval enforcement
+  *is* atomic when backed by `SqliteLedger` (the INSERT is the test-and-set), but the publish
+  path is not. A multi-worker deployment needs a transactional store with a unique
+  `(channel, draft_id)` reservation.
+- **Durability.** `PostLog` persists when given a path. `SnapshotStore`, the pending-draft
+  map, and `InMemoryLedger` do not: a restart loses them. The CLI runs fully in memory.
+- **A Python object is not a security boundary.** `SpendGrant` and the dry-run platform's
+  refusals stop mistakes, not a determined caller in the same process. Real enforcement
+  belongs server-side, at the provider, with an idempotency key.
+- **The gate binds content, not identity.** HMAC proves a token was made by someone holding
+  the key. It does not prove *which* person approved, and this repository has no identity
+  system. A setting where the approver must be provably distinct from the spender needs an
+  asymmetric signature with the private key held only by the approver.
 
 ### Not claimed
 
@@ -529,7 +586,7 @@ repository ships no key, no `.env`, and no config field that needs one.
 
 ## Tests
 
-721 tests, covering the mechanisms above rather than chasing line coverage: the gate's
+740 tests, covering the mechanisms above rather than chasing line coverage: the gate's
 short-circuit (proved with a scorer that raises if called) and its non-compensable floors,
 both dedup layers, every approval refusal path plus the ordering guarantee that a rejected
 token is not burned, domain separation, the spend gate's live re-check and its
@@ -540,10 +597,12 @@ reload, the three no-winner states and that all three are reachable, absent-is-n
 property test for exploration coverage, the full human-approval path including replay and
 wrong-key refusal, and the honesty tests that mechanically prove the dry-run claims.
 
-Three of them are regression guards for bugs found while building this, each of which had
+A number of them are regression guards for bugs found while building this, each of which had
 been invisible in ordinary use: a schedule cap that never fired under an injected clock, an
-inclusive window boundary that would have halved a daily cadence, and an exploration stride
-whose coprimality test never actually constrained anything.
+inclusive window boundary that would have halved a daily cadence, an exploration stride whose
+coprimality test never actually constrained anything, a spend gate that burned a valid human
+approval on a transient mismatch, an intent digest whose separator could be forged into a
+collision, and a forbidden-term check that a single left-to-right mark walked straight past.
 
 ```bash
 .venv/bin/python -m pytest -v

@@ -223,15 +223,28 @@ class SnapshotStore:
         return [row for _, row in sorted(best.values(), key=lambda t: t[0])]
 
     def total_spend_minor(self) -> int | None:
-        """Sum of the current readings, or None if nothing measurable is present.
+        """Total spend across the current readings, or None if it is not fully known.
 
-        None rather than 0 when every reading is unknown, because a budget guard reading
-        "0 spent" from "we cannot see the spend" would let a campaign run forever.
+        None whenever ANY reading is unknown, not merely when all of them are. Summing the
+        readable rows and calling the result a total is the same error as treating missing
+        as zero, one level up: it silently UNDERSTATES spend, and it understates it to the
+        one caller whose job is to stop at a ceiling. A budget guard comparing a partial
+        sum against a limit lets a campaign run past it.
+
+        `known_spend_minor` returns the partial sum for reporting, where the caller can be
+        told plainly that it is incomplete.
         """
-        rows = [r.spend_minor for r in self.latest_effective() if r.spend_minor is not None]
-        if not rows:
+        rows = self.latest_effective()
+        if not rows or any(r.spend_minor is None for r in rows):
             return None
-        return sum(rows)
+        return sum(r.spend_minor for r in rows)  # type: ignore[misc]
+
+    def known_spend_minor(self) -> tuple[int, int]:
+        """(sum of readable spend, count of unreadable rows). For reporting, never for a
+        budget decision."""
+        rows = self.latest_effective()
+        known = [r.spend_minor for r in rows if r.spend_minor is not None]
+        return sum(known), len(rows) - len(known)
 
 
 @dataclass

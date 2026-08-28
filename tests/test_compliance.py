@@ -166,3 +166,47 @@ def test_from_config_defaults_echo_terms_off():
 def test_normalize_is_idempotent():
     once = normalize("  A​B   ｃ  ")
     assert normalize(once) == once
+
+
+# --------------------------------------------------------------------------------------
+# invisible-character evasion, handled categorically
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "codepoint,name",
+    [
+        (0x200B, "zero width space"),
+        (0x200C, "zero width non-joiner"),
+        (0x200D, "zero width joiner"),
+        (0x200E, "left-to-right mark"),
+        (0x200F, "right-to-left mark"),
+        (0x202A, "left-to-right embedding"),
+        (0x2060, "word joiner"),
+        (0x2061, "function application"),
+        (0xFEFF, "zero width no-break space"),
+        (0x00AD, "soft hyphen"),
+        (0x3164, "hangul filler"),
+        (0x0001, "a control character"),
+    ],
+)
+def test_an_invisible_character_cannot_split_a_forbidden_term(codepoint, name):
+    """A HAND-WRITTEN LIST OF INVISIBLE CHARACTERS DOES NOT WORK.
+
+    This started as a list of six well-known offenders and was evaded by U+200E, which was
+    simply not on it. An attacker only has to find the one that was forgotten, so the rule
+    is categorical: strip everything Unicode itself classifies as a format or control
+    character. Each case here is a character that would evade a naive substring match.
+    """
+    floor = ComplianceFloor(forbidden_terms=["forbidden"])
+    split = "forbid" + chr(codepoint) + "den"
+    violations = floor.check(f"a sentence containing {split} in the middle")
+    assert violations, f"{name} (U+{codepoint:04X}) evaded the forbidden-term check"
+    assert violations[0].rule == "forbidden_term"
+
+
+def test_a_visible_character_still_breaks_a_term_because_it_is_a_different_word():
+    """The rule strips what renders as nothing, not what a reader can see. "forbid-den"
+    with a real hyphen is a different string and must not be reported as the term."""
+    floor = ComplianceFloor(forbidden_terms=["forbidden"])
+    assert floor.check("a sentence containing forbid|den in the middle") == []

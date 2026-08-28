@@ -129,7 +129,11 @@ class ApprovalToken:
 
     def canonical(self) -> bytes:
         """Deterministic bytes to sign. Sorted keys, no whitespace, explicit encoding."""
-        return json.dumps(asdict(self), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        # allow_nan=False: NaN and Infinity are not valid JSON, and a NaN timestamp would
+        # make every expiry comparison false, so an expired token would never expire.
+        return json.dumps(
+            asdict(self), sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -198,23 +202,23 @@ def issue(
     return token, _sign(signing_input(token), key)
 
 
-def verify_and_consume(
+def verify(
     *,
     token: ApprovalToken,
     signature: str,
     key: bytes,
     expected_scope: str,
     expected_content_hash: str,
-    ledger: NonceLedger,
+    expected_subject: str | None = None,
     intended_spend_minor: int | None = None,
     now: float | None = None,
 ) -> ApprovalToken:
-    """Check every invariant, then burn the nonce. Raises on any failure.
+    """Every check EXCEPT consuming the nonce. Raises on any failure.
 
-    The caller must pass `expected_content_hash` computed from the bytes it is ABOUT to
-    send, not from the bytes it once stored. Recomputing at the point of action is what
-    makes the binding real; reading back the hash the token itself carries would verify
-    nothing at all.
+    Split out from `verify_and_consume` so a caller with further checks of its own (the
+    spend gate re-reads live platform state) can validate everything first and burn the
+    nonce only once it is actually going to act. Consuming first means a transient
+    mismatch destroys a perfectly good approval and a human has to re-issue it.
     """
     # 1. Signature first: nothing in the token is trustworthy until this passes.
     if not _verify(signing_input(token), signature, key):
@@ -224,9 +228,7 @@ def verify_and_consume(
 
     # 2. Expiry.
     if t >= token.expires_at:
-        raise ExpiredError(
-            f"approval expired at {token.expires_at:.0f}, now {t:.0f}"
-        )
+        raise ExpiredError(f"approval expired at {token.expires_at:.0f}, now {t:.0f}")
 
     # 3. Scope: a publish approval must not authorize a spend.
     if token.scope != expected_scope:
@@ -240,8 +242,22 @@ def verify_and_consume(
             "content changed after approval: refusing to act on unreviewed content"
         )
 
-    # 5. Spend ceiling, for paid scopes.
+    # 5. Subject: WHICH thing was approved, not just what it said.
+    #
+    #    Content hash and subject are different questions and both must be asked. Two
+    #    drafts can carry byte-identical content (the same copy scheduled twice, a repost)
+    #    and an approval for one is not an approval for the other.
+    if expected_subject is not None and not hmac.compare_digest(
+        token.subject, expected_subject
+    ):
+        raise ContentMismatchError(
+            f"approval names subject {token.subject!r}, not {expected_subject!r}"
+        )
+
+    # 6. Spend ceiling, for paid scopes.
     if intended_spend_minor is not None:
+        if intended_spend_minor <= 0:
+            raise SpendLimitError("intended spend must be positive")
         if token.max_spend_minor is None:
             raise SpendLimitError("approval authorizes no spend")
         if intended_spend_minor > token.max_spend_minor:
@@ -249,7 +265,38 @@ def verify_and_consume(
                 f"intended spend {intended_spend_minor} exceeds approved ceiling "
                 f"{token.max_spend_minor}"
             )
+    return token
 
+
+def verify_and_consume(
+    *,
+    token: ApprovalToken,
+    signature: str,
+    key: bytes,
+    expected_scope: str,
+    expected_content_hash: str,
+    ledger: NonceLedger,
+    expected_subject: str | None = None,
+    intended_spend_minor: int | None = None,
+    now: float | None = None,
+) -> ApprovalToken:
+    """Verify, then burn the nonce. Raises on any failure.
+
+    The caller must pass `expected_content_hash` computed from the bytes it is ABOUT to
+    send, not from the bytes it once stored. Recomputing at the point of action is what
+    makes the binding real; reading back the hash the token itself carries would verify
+    nothing at all.
+    """
+    verify(
+        token=token,
+        signature=signature,
+        key=key,
+        expected_scope=expected_scope,
+        expected_content_hash=expected_content_hash,
+        expected_subject=expected_subject,
+        intended_spend_minor=intended_spend_minor,
+        now=now,
+    )
     # 6. Single use. Consumed LAST so a token rejected above is not burned.
     ledger.consume(token.nonce)
     return token

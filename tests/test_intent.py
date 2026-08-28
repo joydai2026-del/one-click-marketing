@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
-from conftest import make_campaign
+from conftest import CREATIVE_HASHES, make_campaign
 
 from ocm.paid.campaign import CreativeRef
 from ocm.paid.intent import canonical_instant, intent_digest, render_review_card
@@ -65,8 +65,8 @@ def test_renaming_a_creative_ref_does_not_change_the_digest(guardrails):
     """Creatives are bound by WHAT THEY ARE. Moving the same bytes to a new path is not a
     new campaign."""
     same_bytes_new_path = (
-        CreativeRef(ref="renamed/a.txt", content_hash="a" * 64),
-        CreativeRef(ref="renamed/b.txt", content_hash="b" * 64),
+        CreativeRef(ref="renamed/a.txt", content_hash=CREATIVE_HASHES["a.txt"]),
+        CreativeRef(ref="renamed/b.txt", content_hash=CREATIVE_HASHES["b.txt"]),
     )
     assert digest_of(make_campaign(guardrails=guardrails)) == digest_of(
         make_campaign(guardrails=guardrails, creatives=same_bytes_new_path)
