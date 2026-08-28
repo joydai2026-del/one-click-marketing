@@ -17,8 +17,9 @@ repository can run end to end with no API key.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import Protocol
 
 from ..models import DimensionScore
 

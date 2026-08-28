@@ -53,7 +53,9 @@ class DryRunTransport:
         if request.operation == "collect":
             metrics = self._metrics_for(request)
             return ChannelResponse(ok=True, data={"metrics": metrics}, dry_run=True)
-        return ChannelResponse(ok=False, error=f"unknown operation {request.operation!r}", dry_run=True)
+        return ChannelResponse(
+            ok=False, error=f"unknown operation {request.operation!r}", dry_run=True
+        )
 
     def _metrics_for(self, request: ChannelRequest) -> dict[str, float]:
         configured = self.synthetic_metrics.get(request.channel)

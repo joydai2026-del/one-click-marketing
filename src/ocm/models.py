@@ -11,8 +11,8 @@ import hashlib
 import json
 import time
 import uuid
-from dataclasses import dataclass, field, asdict
-from enum import Enum
+from dataclasses import asdict, dataclass, field
+from enum import StrEnum
 from typing import Any
 
 
@@ -39,12 +39,12 @@ def now_ts() -> float:
     return time.time()
 
 
-class Verdict(str, Enum):
+class Verdict(StrEnum):
     PASS = "pass"
     FAIL = "fail"
 
 
-class Stage(str, Enum):
+class Stage(StrEnum):
     DRAFTED = "drafted"
     EVALUATED = "evaluated"
     APPROVED = "approved"

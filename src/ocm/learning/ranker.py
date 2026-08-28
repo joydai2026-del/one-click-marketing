@@ -263,7 +263,7 @@ class Tilt:
 
         coords = list(base.coords)
         applied: dict[str, str] = {}
-        for i, (axis_name, value) in enumerate(coords):
+        for i, (axis_name, _current) in enumerate(coords):
             learn = learnings.get(axis_name)
             if learn is None or not learn.actionable:
                 continue

@@ -19,6 +19,7 @@ from .tokens import (
     ephemeral_key,
     issue,
     require_env_key,
+    verify,
     verify_and_consume,
 )
 
@@ -35,6 +36,7 @@ __all__ = [
     "SqliteLedger",
     "ApprovalToken",
     "issue",
+    "verify",
     "verify_and_consume",
     "ephemeral_key",
     "require_env_key",

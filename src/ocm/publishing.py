@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .models import Draft, PublishRecord, Stage
@@ -305,5 +305,5 @@ class Publisher:
 
 
 def window_start(now: float, window_hours: int) -> str:
-    dt = datetime.fromtimestamp(now, tz=timezone.utc) - timedelta(hours=window_hours)
+    dt = datetime.fromtimestamp(now, tz=UTC) - timedelta(hours=window_hours)
     return dt.isoformat()

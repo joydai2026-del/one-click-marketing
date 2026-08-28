@@ -425,7 +425,9 @@ def test_the_campaign_creatives_used_for_the_set_check_come_from_the_campaign(gu
 # --------------------------------------------------------------------------------------
 
 
-def test_a_reflighted_campaign_is_refused(campaign, token_and_sig, ledger, live_state, creative_reads):
+def test_a_reflighted_campaign_is_refused(
+    campaign, token_and_sig, ledger, live_state, creative_reads
+):
     """Flight dates are inside the intent digest, so they are re-checked directly too.
 
     A campaign silently re-flighted to run for a month instead of a week spends the whole

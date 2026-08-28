@@ -228,7 +228,8 @@ class OrganicLoop:
             result.evaluations.append(ev)
             stage = transition(stage, Stage.EVALUATED if ev.passed else Stage.REJECTED)
             if not ev.passed:
-                result.blocked.append(f"{draft.draft_id}: {'; '.join(ev.hard_failures) or 'below threshold'}")
+                why = "; ".join(ev.hard_failures) or "below threshold"
+                result.blocked.append(f"{draft.draft_id}: {why}")
                 continue
             if draft.draft_id in held_ids:
                 result.skipped.append(f"{draft.draft_id}: held for a human")

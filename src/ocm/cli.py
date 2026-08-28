@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import config as cfgmod
@@ -164,7 +164,7 @@ def cmd_paid(args) -> int:
     conf = cfgmod.load(Path(args.campaign))
     campaign = Campaign.from_config(conf.data, source_dir=conf.source_dir)
 
-    starts = datetime(2026, 3, 1, 9, 0, tzinfo=timezone.utc)
+    starts = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
     ends = starts + timedelta(days=campaign.run_days)
     digest = intent_digest(campaign, starts_at=starts, ends_at=ends)
 

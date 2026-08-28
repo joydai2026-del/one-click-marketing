@@ -8,7 +8,6 @@ stops being evidence about the code and starts being evidence about the machine.
 from __future__ import annotations
 
 import hashlib
-
 from pathlib import Path
 
 import pytest

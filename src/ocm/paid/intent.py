@@ -33,9 +33,10 @@ hosts with slightly different clocks must agree on the digest of one intent.
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .campaign import Campaign
+
 
 def _framed(*fields: str) -> bytes:
     """Length-prefix every field before hashing.
@@ -63,7 +64,7 @@ def canonical_instant(dt: datetime) -> str:
         raise ValueError(
             "refusing a timezone-naive instant: two hosts would disagree on its meaning"
         )
-    utc = dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
+    utc = dt.astimezone(UTC).replace(second=0, microsecond=0)
     return utc.strftime("%Y-%m-%dT%H:%MZ")
 
 

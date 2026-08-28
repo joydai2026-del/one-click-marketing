@@ -439,7 +439,12 @@ def test_a_partially_unknown_total_spend_is_None_not_a_partial_sum():
     told plainly that the figure is incomplete.
     """
     store = SnapshotStore()
-    store.append([snapshot(platform_ad_id="ad-1", spend_minor=1000), snapshot(platform_ad_id="ad-2", spend_minor=None)])
+    store.append(
+        [
+            snapshot(platform_ad_id="ad-1", spend_minor=1000),
+            snapshot(platform_ad_id="ad-2", spend_minor=None),
+        ]
+    )
 
     assert store.total_spend_minor() is None
     assert store.known_spend_minor() == (1000, 1)
@@ -447,7 +452,12 @@ def test_a_partially_unknown_total_spend_is_None_not_a_partial_sum():
 
 def test_a_fully_known_total_spend_is_the_sum():
     store = SnapshotStore()
-    store.append([snapshot(platform_ad_id="ad-1", spend_minor=1000), snapshot(platform_ad_id="ad-2", spend_minor=250)])
+    store.append(
+        [
+            snapshot(platform_ad_id="ad-1", spend_minor=1000),
+            snapshot(platform_ad_id="ad-2", spend_minor=250),
+        ]
+    )
     assert store.total_spend_minor() == 1250
     assert store.known_spend_minor() == (1250, 0)
 

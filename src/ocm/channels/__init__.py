@@ -1,7 +1,7 @@
 """Channel adapters and the transport seam."""
 
-from .base import ChannelAdapter, ChannelRequest, ChannelResponse, Transport, ValidationError
 from .adapters import LongFormAdapter, ShortFormAdapter
+from .base import ChannelAdapter, ChannelRequest, ChannelResponse, Transport, ValidationError
 from .registry import build_channels
 from .transport import DryRunTransport, LiveTransport
 
