@@ -2,6 +2,7 @@
 
     ocm demo            run the full loop end to end, organic then paid
     ocm organic         organic rounds only
+    ocm approve         the human-approval path: park a draft, approve it, publish it
     ocm paid            paid loop only: intent, review card, spend gate, collection
     ocm rubric          print the loaded rubric
 
@@ -101,12 +102,14 @@ def cmd_organic(args) -> int:
     print(f"gate mode       {loop.gate_mode} "
           f"(auto_approval_enabled={loop.auto_approval_enabled})")
 
-    if loop.gate_mode == "human":
+    if loop.gate_mode == "human" and not args.auto:
         print(
-            "\nNOTE: gate_mode is 'human', so this run will generate, evaluate, and then\n"
-            "      STOP at the approval boundary. That is the designed behavior: nothing\n"
-            "      publishes without a human. Re-run with --auto to see the full loop\n"
-            "      close, which sets both graduation latches for this process only."
+            "\nNOTE: gate_mode is 'human', so drafts are generated, evaluated, and then\n"
+            "      PARKED at the approval boundary. Nothing publishes without a person.\n"
+            "      Parked drafts are held by content hash, so an approval supplied later\n"
+            "      still applies to the exact bytes that were reviewed.\n"
+            "      Run `ocm approve` to see a parked draft approved and published.\n"
+            "      Run with --auto to see the unattended loop close instead."
         )
 
     if args.auto:
@@ -232,6 +235,8 @@ def cmd_paid(args) -> int:
         creative_reads=reads,
         expected_intent_digest=digest,
         intended_spend_minor=campaign.guardrails.lifetime_budget_minor,
+        expected_starts_at=state.starts_at,
+        expected_ends_at=state.ends_at,
     )
     print(f"   authorized: ceiling {grant.approved_ceiling_minor} minor units, "
           f"approver {grant.approver}")
@@ -303,6 +308,66 @@ def cmd_paid(args) -> int:
     return 0
 
 
+def cmd_approve(args) -> int:
+    """Walk the human-approval path: park a draft, approve it, watch it publish.
+
+    This is the shipped default's happy path, and the thing the repository actually claims.
+    "The machine stops" is only half of it; the other half is that a person can say yes and
+    have that yes be bound to the exact bytes they looked at.
+    """
+    print(BANNER)
+    loop, _, transport = _build_organic(Path(args.organic), Path(args.rubric))
+    now = 1_800_000_000.0
+
+    print("\n1. ROUND ONE, gate_mode=human")
+    first = loop.run_round(0, now=now)
+    print(f"   drafted   {len(first.drafted)}")
+    print(f"   published {len(first.published)}   <- nothing, by design")
+    print(f"   parked    {len(loop.pending)} draft(s) awaiting a human")
+    if not loop.pending:
+        print("   nothing was parked, so there is nothing to approve")
+        return 1
+
+    chash, draft = next(iter(loop.pending.items()))
+    print("\n2. WHAT THE HUMAN REVIEWS")
+    print(f"   draft        {draft.draft_id}")
+    print(f"   channel      {draft.channel}")
+    print(f"   content hash {chash}")
+    body = " ".join(draft.body.split())
+    print(f"   body         {body[:150]}{'...' if len(body) > 150 else ''}")
+
+    print("\n3. THE HUMAN APPROVES")
+    token, sig = issue(
+        scope=f"publish:{draft.channel}",
+        content_hash=chash,
+        subject=draft.draft_id,
+        key=loop.approval_key,
+        approver="a-human-at-a-console",
+    )
+    loop.approvals[chash] = (token, sig)
+    print(f"   approval bound to {token.content_hash}")
+    print(f"   scope             {token.scope}")
+    print(f"   expires           {token.expires_at - token.issued_at:.0f}s after issue")
+
+    print("\n4. ROUND TWO: the parked draft publishes")
+    second = loop.run_round(1, now=now)
+    for r in second.published:
+        print(f"   published {r.channel}  {r.external_id}  (dry_run={r.dry_run})")
+    if not second.published:
+        print("   ERROR: the approved draft did not publish")
+        return 1
+
+    print("\n5. THE SAME APPROVAL, PRESENTED AGAIN")
+    loop.approvals[chash] = (token, sig)
+    loop.pending[chash] = draft
+    third = loop.run_round(2, now=now + 25 * 3600)
+    replayed = [r for r in third.published if r.draft_id == draft.draft_id]
+    print(f"   republished the approved draft: {len(replayed)}  <- single use, so zero")
+
+    print(f"\n   transport publish calls: {len(transport.requests_for('publish'))}")
+    return 0 if not replayed else 1
+
+
 def cmd_rubric(args) -> int:
     rubric = Rubric.from_config(cfgmod.load_raw(Path(args.rubric)))
     print(f"rubric {rubric.version}   pass threshold {rubric.threshold} / 5.0\n")
@@ -343,6 +408,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("demo", parents=[common]).set_defaults(func=cmd_demo)
     sub.add_parser("organic", parents=[common]).set_defaults(func=cmd_organic)
     sub.add_parser("paid", parents=[common]).set_defaults(func=cmd_paid)
+    sub.add_parser("approve", parents=[common]).set_defaults(func=cmd_approve)
     sub.add_parser("rubric", parents=[common]).set_defaults(func=cmd_rubric)
 
     args = parser.parse_args(argv)

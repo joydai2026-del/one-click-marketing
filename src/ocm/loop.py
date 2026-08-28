@@ -37,6 +37,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .approval.errors import ApprovalError
 from .approval.ledger import InMemoryLedger
 from .approval.tokens import ephemeral_key, issue, verify_and_consume
 from .evaluation.gate import QualityGate
@@ -85,6 +86,20 @@ class OrganicLoop:
     auto_approval_enabled: bool = False  # second latch; ships OFF
     approval_key: bytes = field(default_factory=ephemeral_key)
     ledger: InMemoryLedger = field(default_factory=InMemoryLedger)
+    # Out-of-band human approvals, keyed by the content hash they were issued for:
+    # {content_hash: (token, signature)}. This is how a person who reviewed a draft
+    # somewhere else authorizes it. Keying on the HASH rather than on a draft id is what
+    # makes a stale approval useless: regenerate the draft and its hash no longer matches
+    # any supplied key, so the approval simply does not apply to the new bytes.
+    approvals: dict[str, tuple] = field(default_factory=dict)
+    # Drafts that cleared the gate but have no approval yet, keyed by content hash.
+    #
+    # A human-gated loop MUST hold these. If every round threw its parked drafts away and
+    # generated fresh ones, a reviewer's approval could never land: by the time they said
+    # yes, the thing they reviewed no longer exists anywhere in the system, and the gate
+    # would be a machine that stops rather than a gate a person can open. Holding them is
+    # what makes the human half of the loop actually reachable.
+    pending: dict[str, Draft] = field(default_factory=dict)
     _texts: dict[str, str] = field(default_factory=dict)
     _samples: list[Sample] = field(default_factory=list)
 
@@ -100,6 +115,29 @@ class OrganicLoop:
         result = RoundResult(round_index=round_index)
 
         staged: list[tuple[str, Draft]] = []
+
+        # 0. PARKED DRAFTS FIRST. Anything a human approved since the last round publishes
+        #    now, before any new generation. Ordering matters: a reviewer's decision should
+        #    take effect on the next tick, not queue behind fresh content, and it must be
+        #    checked before the schedule cap consumes the slot with something newer.
+        for chash, draft in list(self.pending.items()):
+            if chash not in self.approvals:
+                continue
+            adapter = self.channels.get(draft.channel)
+            if adapter is None:
+                continue
+            allowed, reason = self.schedule.may_publish(self.log, draft.channel, now=now)
+            if not allowed:
+                result.skipped.append(f"{draft.draft_id}: approved but {reason}")
+                continue
+            if not self._approve(draft, None):
+                result.skipped.append(f"{draft.draft_id}: supplied approval did not verify")
+                self.pending.pop(chash, None)
+                continue
+            self.pending.pop(chash, None)
+            published = self._publish_and_collect(draft, adapter, result, now)
+            if not published:
+                continue
 
         for channel_name, adapter in self.channels.items():
             # 1. Schedule first: a capped channel costs zero model calls.
@@ -199,42 +237,18 @@ class OrganicLoop:
             # 6. Approval. This is where the loop stops in human mode.
             approved = self._approve(draft, ev)
             if not approved:
+                # PARKED, not discarded. The draft is held by content hash so that a human
+                # reviewing it can approve it and have that approval land on a later tick.
+                self.pending[draft.content_hash] = draft
                 result.skipped.append(
                     f"{draft.draft_id}: awaiting human approval "
                     f"(gate_mode={self.gate_mode}, auto_enabled={self.auto_approval_enabled})"
                 )
                 continue
-            stage = transition(stage, Stage.APPROVED)
+            transition(stage, Stage.APPROVED)
 
-            # 7. Publish.
-            adapter = self.channels[channel_name]
-            publisher = Publisher(log=self.log)
-            try:
-                # The publisher stamps published_at from THIS clock, so the durable log and
-                # the schedule cap are always read against the same clock they were
-                # written with. See Publisher.publish.
-                record = publisher.publish(adapter, draft, now=now)
-            except GateError as exc:
-                result.skipped.append(f"{draft.draft_id}: {exc}")
-                continue
-            stage = transition(stage, Stage.PUBLISHED)
-            result.published.append(record)
-            self._texts[draft.draft_id] = draft.body
-            self.gate.dedup.add(draft.draft_id, draft.body, draft.content_hash)
-
-            # 8. Collect.
-            eng = adapter.collect(record)
-            result.engagement[record.publish_id] = eng
-            transition(stage, Stage.COLLECTED)
-            self._samples.append(
-                Sample(
-                    variant_id=draft.draft_id,
-                    channel=channel_name,
-                    tags=dict(p.split("=", 1) for p in draft.derived_from),
-                    score=adapter.normalize(eng),
-                    excerpt=draft.body,
-                )
-            )
+            # 7 and 8. Publish and collect.
+            self._publish_and_collect(draft, self.channels[channel_name], result, now)
 
         # 9. Learn.
         for channel_name in self.channels:
@@ -243,12 +257,87 @@ class OrganicLoop:
             )
         return result
 
-    def _approve(self, draft: Draft, ev: EvalResult) -> bool:
-        """Human mode stops. Auto mode proceeds only for a completely clean draft."""
+    def _publish_and_collect(self, draft, adapter, result, now: float) -> bool:
+        """Publish one approved draft, then measure it. Shared by both approval paths.
+
+        Returns True if it published. Both the parked-approval path and the fresh-draft
+        path go through here so that neither can drift into having different publishing,
+        dedup, or measurement behavior than the other, which is exactly the kind of
+        divergence that makes one path safe and the other not.
+        """
+        try:
+            # The publisher stamps published_at from THIS clock, so the durable log and
+            # the schedule cap are always read against the same clock they were written
+            # with. See Publisher.publish.
+            record = Publisher(log=self.log).publish(adapter, draft, now=now)
+        except GateError as exc:
+            result.skipped.append(f"{draft.draft_id}: {exc}")
+            return False
+
+        result.published.append(record)
+        self._texts[draft.draft_id] = draft.body
+        self.gate.dedup.add(draft.draft_id, draft.body, draft.content_hash)
+
+        eng = adapter.collect(record)
+        result.engagement[record.publish_id] = eng
+        self._samples.append(
+            Sample(
+                variant_id=draft.draft_id,
+                channel=draft.channel,
+                tags=dict(p.split("=", 1) for p in draft.derived_from),
+                score=adapter.normalize(eng),
+                excerpt=draft.body,
+            )
+        )
+        return True
+
+    def _approve(self, draft: Draft, ev: EvalResult | None) -> bool:
+        """Decide whether this draft may publish.
+
+        Two ways to get a yes, and only two:
+
+        1. AN OUT-OF-BAND HUMAN APPROVAL. A person reviewed the draft somewhere else (a
+           console, a chat, a web form) and supplied a signed token for it. That token is
+           verified here against a hash recomputed from the draft about to be sent, so an
+           approval issued for different bytes is refused.
+
+        2. AUTO MODE, for a draft that passed every check with zero flags, and only when
+           BOTH graduation latches are on.
+
+        Everything else is a no, and a no leaves the draft pending rather than rejecting
+        it. The machine is trusted to say "this is clean", never to say "this is bad".
+        """
+        # 1. An out-of-band human approval always wins, in either gate mode.
+        supplied = self.approvals.get(draft.content_hash) if self.approvals else None
+        if supplied is not None:
+            token, sig = supplied
+            try:
+                verify_and_consume(
+                    token=token,
+                    signature=sig,
+                    key=self.approval_key,
+                    expected_scope=f"publish:{draft.channel}",
+                    # Recomputed from the draft about to be sent. Reading the hash off the
+                    # token would check the token against itself.
+                    expected_content_hash=draft.content_hash,
+                    ledger=self.ledger,
+                )
+                return True
+            except ApprovalError:
+                # A refused approval is not a fallthrough to auto mode. If a human tried
+                # to approve this and the approval did not verify, that is a stop.
+                return False
+
         if self.gate_mode != "auto":
             return False
         if not self.auto_approval_enabled:
             # Second latch. Both must be on; one edit is not enough to go unattended.
+            return False
+        if ev is None:
+            # A parked draft with no supplied approval reached the auto branch. Auto mode
+            # grants only on a FRESH evaluation, never on a remembered one: the config,
+            # the rubric, or the term list may have changed since this draft was parked,
+            # so the verdict that cleared it then is not evidence about it now.
             return False
         if ev.hard_failures or ev.notes:
             # Auto skips the TAP, never the CHECK. Anything flagged waits for a human and

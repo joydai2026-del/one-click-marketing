@@ -344,3 +344,122 @@ def test_the_banner_states_what_the_run_can_and_cannot_do(capsys):
     banner = capsys.readouterr().out
     assert "No network call is made" in banner
     assert "no money can be spent" in banner
+
+
+# --------------------------------------------------------------------------------------
+# the out-of-band human approval path
+# --------------------------------------------------------------------------------------
+
+
+def _approve(loop, draft, *, scope=None, content_hash=None):
+    """Stand in for a person approving a draft in some console elsewhere."""
+    from ocm.approval.tokens import issue
+
+    return issue(
+        scope=scope or f"publish:{draft.channel}",
+        content_hash=content_hash or draft.content_hash,
+        subject=draft.draft_id,
+        key=loop.approval_key,
+        approver="a-human",
+    )
+
+
+def test_a_supplied_human_approval_publishes_in_human_mode():
+    """The shipped default refuses on its own, but a real signed approval gets through.
+
+    This is the whole product claim: not "the machine stops", but "a person can say yes,
+    and the yes is bound to what they saw".
+    """
+    loop, _, _ = build(auto=False)
+    assert loop.gate_mode == "human"
+
+    first = loop.run_round(0, now=BASE_NOW)
+    assert first.published == []
+    assert first.drafted
+
+    draft = first.drafted[0]
+    loop.approvals[draft.content_hash] = _approve(loop, draft)
+
+    second = loop.run_round(1, now=BASE_NOW)
+    assert [r.draft_id for r in second.published] == [draft.draft_id]
+
+
+def test_an_approval_does_not_carry_over_to_regenerated_content():
+    """Approve draft A, let the pipeline produce draft B, and the approval must not apply.
+
+    Keying approvals on the CONTENT HASH is what makes this automatic: different bytes
+    means a different key, so a stale approval simply does not match anything.
+    """
+    loop, _, _ = build(auto=False)
+    first = loop.run_round(0, now=BASE_NOW)
+    draft = first.drafted[0]
+
+    # A human approves these exact bytes.
+    loop.approvals[draft.content_hash] = _approve(loop, draft)
+    # The content then changes underneath them.
+    loop.approvals["not-the-hash-of-anything-generated"] = loop.approvals.pop(
+        draft.content_hash
+    )
+
+    second = loop.run_round(1, now=BASE_NOW)
+    assert second.published == []
+
+
+def test_an_approval_for_the_wrong_channel_is_refused():
+    """A publish approval is scoped to one channel. Reusing it elsewhere is a scope error,
+    not a convenience."""
+    loop, _, _ = build(auto=False)
+    first = loop.run_round(0, now=BASE_NOW)
+    draft = first.drafted[0]
+
+    loop.approvals[draft.content_hash] = _approve(
+        loop, draft, scope="publish:some-other-channel"
+    )
+    assert loop.run_round(1, now=BASE_NOW).published == []
+
+
+def test_an_approval_signed_with_the_wrong_key_is_refused():
+    loop, _, _ = build(auto=False)
+    first = loop.run_round(0, now=BASE_NOW)
+    draft = first.drafted[0]
+
+    from ocm.approval.tokens import issue
+
+    token, sig = issue(
+        scope=f"publish:{draft.channel}",
+        content_hash=draft.content_hash,
+        subject=draft.draft_id,
+        key=b"an-attackers-key-not-the-loops-key",
+        approver="not-really-a-human",
+    )
+    loop.approvals[draft.content_hash] = (token, sig)
+    assert loop.run_round(1, now=BASE_NOW).published == []
+
+
+def test_a_human_approval_is_single_use():
+    """Otherwise one approval is a reusable coupon for every future round."""
+    loop, _, _ = build(auto=False)
+    first = loop.run_round(0, now=BASE_NOW)
+    draft = first.drafted[0]
+    loop.approvals[draft.content_hash] = _approve(loop, draft)
+
+    published_once = loop.run_round(1, now=BASE_NOW).published
+    assert len(published_once) == 1
+
+    # The same approval, still sitting in the map, must not authorize a second publish.
+    published_twice = loop.run_round(2, now=BASE_NOW + 25 * 3600).published
+    assert [r.draft_id for r in published_twice] != [draft.draft_id]
+
+
+def test_a_refused_human_approval_does_not_fall_through_to_auto_mode():
+    """If a person tried to approve this and it did not verify, that is a stop, not a
+    reason to let the machine decide instead."""
+    loop, _, _ = build(auto=True)
+    first = loop.run_round(0, now=BASE_NOW)
+    draft = first.drafted[0]
+
+    token, sig = _approve(loop, draft)
+    loop.approvals[draft.content_hash] = (token, sig + "tampered")
+
+    second = loop.run_round(1, now=BASE_NOW + 25 * 3600)
+    assert draft.draft_id not in [r.draft_id for r in second.published]

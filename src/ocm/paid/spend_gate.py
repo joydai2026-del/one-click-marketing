@@ -85,6 +85,8 @@ def authorize(
     creative_reads: list[CreativeRead],
     expected_intent_digest: str,
     intended_spend_minor: int,
+    expected_starts_at: str | None = None,
+    expected_ends_at: str | None = None,
     now: float | None = None,
 ) -> SpendGrant:
     """Run every check. Raise `SpendRefused` naming all failures, or mint a grant.
@@ -137,6 +139,23 @@ def authorize(
     if live_state.currency != g.currency:
         reasons.append(
             f"live currency {live_state.currency!r} does not match approved {g.currency!r}"
+        )
+
+    # Flight dates. These are INSIDE the intent digest, so a mismatch here should already
+    # have been caught by the digest comparison above. They are re-checked anyway because
+    # the digest is a derived value and this is the direct observation: if the two ever
+    # disagree, the direct check is the one to trust. A campaign silently re-flighted to
+    # run for a month instead of a week spends the approved ceiling against an audience
+    # and a moment nobody reviewed.
+    if expected_starts_at is not None and live_state.starts_at != expected_starts_at:
+        reasons.append(
+            f"live flight start {live_state.starts_at!r} does not match the approved "
+            f"{expected_starts_at!r}"
+        )
+    if expected_ends_at is not None and live_state.ends_at != expected_ends_at:
+        reasons.append(
+            f"live flight end {live_state.ends_at!r} does not match the approved "
+            f"{expected_ends_at!r}"
         )
 
     # 3. The creatives must still be the approved bytes.

@@ -160,11 +160,15 @@ def test_a_timeout_raises_indeterminate_outcome_and_is_not_retried():
     log = PostLog()
     adapter = RecordingAdapter(raise_timeout=True)
 
-    with pytest.raises(IndeterminateOutcome, match="parked for a human"):
+    with pytest.raises(IndeterminateOutcome, match="never auto-retried"):
         Publisher(log=log).publish(adapter, make_draft(BODY))
 
     assert adapter.publish_calls == 1
+    # No CONFIRMED post, so the cap is untouched and the slot is not burned.
     assert log.total() == 0
+    # But the intent row survives, because the outcome genuinely is unknown. Erasing it
+    # would destroy the only evidence that something may have been published.
+    assert len(log.dangling_intents()) == 1
 
 
 def test_indeterminate_outcome_is_not_a_gate_error():
@@ -178,8 +182,11 @@ def test_a_confirmed_publish_is_recorded_in_the_log():
     log = PostLog()
     record = Publisher(log=log).publish(RecordingAdapter(name="substack"), make_draft(BODY))
     assert log.total() == 1
-    assert log.entries()[0]["external_id"] == record.external_id
-    assert log.entries()[0]["channel"] == "substack"
+    assert log.confirmed()[0]["external_id"] == record.external_id
+    assert log.confirmed()[0]["channel"] == "substack"
+    # The intent row was written first and is now matched by a confirmation, so nothing
+    # is left dangling.
+    assert log.dangling_intents() == []
 
 
 def test_the_publisher_stamps_published_at_from_its_own_clock():
@@ -200,7 +207,7 @@ def test_the_publisher_stamps_published_at_from_its_own_clock():
     record = Publisher(log=log).publish(adapter, make_draft(BODY), now=FIXED_NOW + 999_999)
 
     assert record.published_at == FIXED_NOW + 999_999
-    assert log.entries()[0]["published_at"] == FIXED_NOW + 999_999
+    assert log.confirmed()[0]["published_at"] == FIXED_NOW + 999_999
 
 
 def test_a_publish_with_no_clock_keeps_the_adapters_own_timestamp():
@@ -208,7 +215,7 @@ def test_a_publish_with_no_clock_keeps_the_adapters_own_timestamp():
     log = PostLog()
     record = Publisher(log=log).publish(RecordingAdapter(), make_draft(BODY), now=None)
     assert record.published_at == FIXED_NOW
-    assert log.entries()[0]["published_at"] == FIXED_NOW
+    assert log.confirmed()[0]["published_at"] == FIXED_NOW
 
 
 def test_the_publisher_clock_and_the_schedule_cap_read_the_same_log():
@@ -223,15 +230,38 @@ def test_the_publisher_clock_and_the_schedule_cap_read_the_same_log():
     assert policy.may_publish(log, "fake", now=simulated + 25 * 3600)[0] is True
 
 
-def test_a_refused_publish_stamps_nothing_because_it_records_nothing():
-    """The restamp happens after the external-id check, so an unfindable post leaves the
-    log untouched rather than leaving a correctly-timestamped phantom entry."""
+def test_a_publish_refused_for_an_empty_id_confirms_nothing_but_leaves_the_intent():
+    """The channel WAS called, so the intent row must stand.
+
+    An empty external id means the channel may well have published something the system
+    cannot address. That is precisely the possibly-published state, so the row stays
+    dangling for a human. What must NOT happen is a confirmation: the cap is untouched and
+    no phantom entry claims a post that cannot be found.
+    """
     log = PostLog()
     with pytest.raises(GateError):
         Publisher(log=log).publish(
             RecordingAdapter(external_id=""), make_draft(BODY), now=FIXED_NOW
         )
+    assert log.confirmed() == []
+    assert log.total() == 0
+    assert len(log.dangling_intents()) == 1
+
+
+def test_a_validation_failure_leaves_no_intent_row_at_all():
+    """The channel was never called, so there is nothing ambiguous to reconcile. A
+    dangling row here would send a human to investigate a publish that never started."""
+    from ocm.channels.base import ValidationError
+
+    log = PostLog()
+    with pytest.raises(GateError):
+        Publisher(log=log).publish(
+            RecordingAdapter(validation_errors=[ValidationError("title", "required")]),
+            make_draft(BODY),
+            now=FIXED_NOW,
+        )
     assert log.entries() == []
+    assert log.dangling_intents() == []
 
 
 # --------------------------------------------------------------------------------------
@@ -420,9 +450,15 @@ def test_from_config_defaults_to_one_per_day():
     assert (policy.max_per_window, policy.window_hours) == (1, 24)
 
 
-def test_the_cap_lives_in_exactly_one_place():
+def test_the_cap_is_decided_in_exactly_one_place():
     """The version this distills had the same cap expressed in two files, and keeping them
-    agreeing was manual. Any other module deciding "may this publish" is the regression.
+    agreeing was manual. Any other module DECIDING "may this publish" is the regression.
+
+    Note what is and is not asserted. The loop calls `may_publish` from more than one site
+    (the parked-approval path and the fresh-draft path), and that is fine: they are two
+    callers of one decision. The regression would be the loop reading the policy's fields
+    and doing the comparison itself, so what is asserted is that no cap ARITHMETIC exists
+    outside SchedulePolicy.
     """
     import inspect
 
@@ -431,9 +467,86 @@ def test_the_cap_lives_in_exactly_one_place():
 
     assert "may_publish" in inspect.getsource(pub_mod.SchedulePolicy)
     loop_src = inspect.getsource(loop_mod)
-    assert loop_src.count("may_publish") == 1
-    assert "max_per_window" not in loop_src
+
+    # The loop asks the policy, and asks it at least once.
+    assert "may_publish" in loop_src
+    # But it never reimplements the decision: no policy fields read, no counting.
+    for reimplementation in ("max_per_window", "window_hours", "count_in_window"):
+        assert reimplementation not in loop_src, (
+            f"the loop references {reimplementation!r}, which means the cap decision has "
+            f"started to leak out of SchedulePolicy"
+        )
 
 
 def test_window_start_is_the_utc_iso_instant_one_window_ago():
     assert window_start(FIXED_NOW, 24).startswith("2027-01-14T")
+
+
+# --------------------------------------------------------------------------------------
+# the durable intent row
+# --------------------------------------------------------------------------------------
+
+
+def test_the_intent_row_is_written_before_the_channel_is_called(tmp_path):
+    """Committed and fsynced BEFORE the network call, or it proves nothing.
+
+    An intent row that lands after the call cannot distinguish "crashed before publishing"
+    from "crashed after publishing", which is the entire ambiguity it exists to resolve.
+    """
+    path = tmp_path / "posts.jsonl"
+    log = PostLog(path=path)
+    seen = {}
+
+    class Watcher(RecordingAdapter):
+        def publish(self, draft):
+            # Read the file from disk at the moment of the call, not the in-memory list.
+            seen["rows"] = json.loads(path.read_text().splitlines()[0])
+            return super().publish(draft)
+
+    Publisher(log=log).publish(Watcher(), make_draft(BODY), now=FIXED_NOW)
+    assert seen["rows"]["phase"] == "posting"
+
+
+def test_a_dangling_intent_is_reported_and_a_matched_one_is_not(tmp_path):
+    log = PostLog(path=tmp_path / "posts.jsonl")
+
+    # Distinct draft ids, because matching is keyed on draft_id. That is sound given
+    # slot-derived ids are unique per (run, channel, slot), and this test would silently
+    # pass for the wrong reason if both publishes shared the helper's default id.
+    Publisher(log=log).publish(
+        RecordingAdapter(), make_draft(BODY, draft_id="landed"), now=FIXED_NOW
+    )
+    assert log.dangling_intents() == []
+
+    with pytest.raises(IndeterminateOutcome):
+        Publisher(log=log).publish(
+            RecordingAdapter(raise_timeout=True),
+            make_draft(BODY + " other", draft_id="unknown-outcome"),
+            now=FIXED_NOW,
+        )
+    dangling = log.dangling_intents()
+    assert [d["draft_id"] for d in dangling] == ["unknown-outcome"]
+
+
+def test_an_unconfirmed_intent_does_not_consume_the_cap():
+    """A channel error must not silently cost a day of output."""
+    log = PostLog()
+    with pytest.raises(IndeterminateOutcome):
+        Publisher(log=log).publish(
+            RecordingAdapter(raise_timeout=True), make_draft(BODY), now=FIXED_NOW
+        )
+    assert log.total() == 0
+    assert log.count_in_window("substack", now=FIXED_NOW, window_hours=24) == 0
+    allowed, _ = SchedulePolicy(max_per_window=1).may_publish(log, "substack", now=FIXED_NOW)
+    assert allowed
+
+
+def test_dangling_intents_survive_a_reload_from_disk(tmp_path):
+    """The point of fsync: a fresh process must still see the ambiguity."""
+    path = tmp_path / "posts.jsonl"
+    log = PostLog(path=path)
+    with pytest.raises(IndeterminateOutcome):
+        Publisher(log=log).publish(
+            RecordingAdapter(raise_timeout=True), make_draft(BODY), now=FIXED_NOW
+        )
+    assert len(PostLog(path=path).dangling_intents()) == 1

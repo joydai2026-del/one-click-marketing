@@ -5,7 +5,10 @@ generation, quality gating, human approval, distribution, results collection, an
 that feeds the next round.** Organic accounts and paid campaigns share one spine.
 
 **A human approves before anything publishes or spends, and the approval is
-cryptographically bound to the exact content that was reviewed.**
+cryptographically bound to the exact content that was reviewed.** The approval mechanism is
+implemented and tested end to end. The review *surface* a person would use (a console, a
+chat, a web form) is out of scope here: this repository is the engine behind it, and a
+supplied signed token stands in for the click.
 
 Everything here runs offline. There is no network client in this repository, no credential
 is read, nothing publishes, and no money can move.
@@ -17,6 +20,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 .venv/bin/python -m ocm.cli demo      # the whole loop, organic then paid
 .venv/bin/python -m ocm.cli organic   # organic rounds only
+.venv/bin/python -m ocm.cli approve   # park a draft, approve it, watch it publish
 .venv/bin/python -m ocm.cli paid      # intent, review card, spend gate, collection
 .venv/bin/python -m ocm.cli rubric    # print the loaded quality rubric
 .venv/bin/python -m pytest            # the test suite
@@ -33,11 +37,14 @@ flowchart LR
     subgraph ORGANIC["Organic loop"]
         direction LR
         SCHED[Schedule check<br/>one post per channel<br/>per window] --> GEN[Generate<br/>grounded in a fact bank<br/>inside a typed style space]
-        GEN --> GATE{Quality gate}
-        GATE -->|hard floor tripped| BLOCK[Blocked<br/>rubric never scored]
+        GEN --> HOLD{Identical across<br/>channels?}
+        HOLD -->|yes| HELD[Held for a human]
+        HOLD -->|no| GATE{Quality gate}
+        GATE -->|hard floor tripped<br/>or below threshold| BLOCK[Blocked]
         GATE -->|passes| APPR{{Human approval<br/>bound to content hash}}
-        APPR -->|approved| PUB[Publish<br/>via channel adapter]
-        APPR -->|no approval| WAIT[Waits. Nothing publishes.]
+        APPR -->|signed approval supplied| PUB[Publish<br/>via channel adapter]
+        APPR -->|none yet| WAIT[Parked by content hash.<br/>Nothing publishes.]
+        WAIT -.->|approval arrives later| APPR
         PUB --> COLL[Collect engagement]
         COLL --> LEARN[Rank style dimensions<br/>per channel]
     end
@@ -54,7 +61,7 @@ flowchart LR
         SGATE -->|all clear| GRANT[SpendGrant minted]
         GRANT --> RES[Collect results<br/>append-only snapshots]
     end
-    RES -.->|feeds the next round| CAMP
+    RES -.->|informs the next round<br/>(operator-driven, not automated here)| CAMP
 
     style APPR fill:#2d5016,color:#fff
     style SIGN fill:#2d5016,color:#fff
@@ -62,7 +69,8 @@ flowchart LR
     style SGATE fill:#4a3800,color:#fff
     style BLOCK fill:#5a1a1a,color:#fff
     style REFUSE fill:#5a1a1a,color:#fff
-    style WAIT fill:#5a1a1a,color:#fff
+    style HELD fill:#5a1a1a,color:#fff
+    style WAIT fill:#4a3800,color:#fff
 ```
 
 ---
@@ -113,15 +121,20 @@ the ad platform right now is still that intent. Between approval and spend, a ca
 deleted and recreated under the same id with a different budget.
 
 So every bound field is re-compared against **live platform state** at spend time: subject,
-intent digest, budget, currency, and the creatives re-hashed off disk.
+intent digest, budget, currency, flight start and end, and the creatives re-hashed off disk.
+Flight dates sit inside the digest already, so they are checked twice on purpose: the digest
+is a derived value, and the direct field comparison is the observation to trust if the two
+ever disagree.
 
 - **An empty live digest refuses.** It does not pass. A campaign this system cannot prove
   anything about resolves to no.
 - **All mismatches are reported together.** Raising on the first one turns a five-field
   problem into five review cycles.
 - **The result is a capability, not a boolean.** `authorize` returns a frozen `SpendGrant`
-  that cannot be constructed from outside the module. A boolean can be shadowed by a later
-  `= True`.
+  whose constructor refuses to build one without a module-private sentinel. A boolean can be
+  shadowed by a later `= True`; this cannot be produced by accident. It is a guard against
+  mistakes, not a security boundary: Python has no private state, so a determined caller can
+  import the sentinel. The value is that every *accidental* path to a grant fails loudly.
 
 ### 3. The intent digest is deterministic, and excludes anything machine-specific
 
@@ -248,9 +261,10 @@ The compliance floor includes a **configurable forbidden-substring check**, matc
 NFKC folding, invisible-character stripping, and whitespace collapse, so cosmetic evasion
 does not work. Violations are reported **by index rather than by value**, because the term
 list is the sensitive artifact and an audit log is a wider surface than a config file. The
-same terms are masked out of the "avoid repeating these" block before recent history is shown
-back to the generator, so the model is never handed the exact string it was told never to
-write.
+term list is necessarily stated in the generation instruction (you cannot ask a model to avoid
+something without naming it), but it is **masked out of the "avoid repeating these" block**
+before recent history is shown back. Otherwise a term that once slipped into a published post
+would be handed straight back to the model as an example of its own established voice.
 
 ### 9. Near-duplicate rejection, which a hash cannot do
 
@@ -271,9 +285,13 @@ crash-and-retry produces a new id, the store does not recognize it, and the pipe
 publishes a second copy of something a human already saw.
 
 So `slot_id = sha256(style_id | topic)` and identity is derived from the **slot inputs**. Re-run
-the same tick and every id is identical, so the store's uniqueness check deduplicates for
-free. Fields are NUL-separated so `("a.b", "c")` and `("a", "b.c")` cannot collide, and a slot
-collision within one run raises loudly rather than letting planned content silently vanish.
+the same tick and every id is identical, which is the property a durable store needs in order
+to deduplicate a retry with a uniqueness constraint. Fields are NUL-separated so `("a.b", "c")`
+and `("a", "b.c")` cannot collide, and a slot collision within one run raises loudly rather
+than letting planned content silently vanish.
+
+This repository provides the stable identity, not the durable store: the in-memory loop has no
+insert-or-ignore step, so idempotency is *available* here rather than *enforced* here.
 
 ### 11. `posting` exists so a crash is not ambiguous
 
@@ -282,14 +300,19 @@ collision within one run raises loudly rather than letting planned content silen
 The publish state machine is an explicit transition table, and `evaluated -> published` is
 not in it: nothing reaches a channel without passing through an approval.
 
-`posting` is the phase committed immediately **before** the network call. Without it, a crash
-mid-publish is indistinguishable from a crash before publish, and recovery has to guess.
-Guessing wrong loses a post in one direction and double-posts in the other.
+`posting` is an intent row appended and **fsynced before** the network call, and matched by a
+confirmation row after. Without it, a crash mid-publish is indistinguishable from a crash
+before publish, and recovery has to guess. Guessing wrong loses a post in one direction and
+double-posts in the other. `dangling_intents()` returns the intent rows with no matching
+confirmation: exactly the possibly-published set a human must reconcile.
 
-An **indeterminate outcome is not a failure**. A timeout parks the row and is never
-auto-retried, because retrying an unknown outcome is how one approved campaign becomes two.
-And a channel reporting success with no external id raises: that is a post the system can
-never find, measure, or delete, which is worse than a failure.
+Only confirmed rows count toward the cap, so a failed publish never burns the day's slot.
+
+An **indeterminate outcome is not a failure**. A timeout leaves the intent row standing and
+is never auto-retried, because retrying an unknown outcome is how one approved post becomes
+two. Deleting the row on the way out would destroy the only evidence that something may have
+gone out. And a channel reporting success with no external id raises: that is a post the
+system can never find, measure, or delete, which is worse than a failure.
 
 ### 12. Results storage is append-only, resolved at read time
 
@@ -341,8 +364,17 @@ Two gate modes, both config-driven. The difference is precise:
 
 | Mode | Behavior |
 |---|---|
-| `human` (shipped default) | the run stops. A signed approval must be supplied out of band. |
+| `human` (shipped default) | drafts are **parked**, keyed by content hash. A signed approval supplied out of band publishes them on the next tick. |
 | `auto` | may proceed without the human tap, but **only** for a draft that passed every check with zero flags. |
+
+Parking is the part that makes the gate usable rather than merely obstructive. If each round
+discarded its unapproved drafts and generated fresh ones, a reviewer's approval could never
+land: by the time they said yes, the thing they reviewed would no longer exist anywhere in
+the system. `ocm approve` walks the whole path, including the replay refusal at the end.
+
+An out-of-band approval wins in **either** mode, and a supplied approval that fails to verify
+is a stop, not a fallthrough to auto. If a person tried to approve something and the approval
+did not check out, that is the one moment the machine must not decide for itself.
 
 **Auto skips the tap, never the check.** A draft that fails in auto mode is left *pending* for
 a human and is never auto-rejected: the machine is trusted to say "this is clean", not to say
@@ -436,6 +468,13 @@ comments describe are bugs that actually happened.
   invented product and assert nothing about any real company, person, or result.
 - **The two channel adapters** are examples chosen to have genuinely different economics.
   They implement the real interface but talk to no real API.
+- **The paid side is a sequence, not an autonomous loop.** `OrganicLoop` runs rounds on its
+  own; the paid path is driven step by step by `ocm paid` (intent, review card, gate,
+  collection). Results collection is implemented and real; deciding what the *next* campaign
+  should be from those results is an operator judgment this repository does not automate, and
+  the dotted arrow in the diagram says so.
+- **The human review surface** (whatever a person actually looks at and clicks) is not here.
+  The token that surface would produce is, along with every check performed on it.
 
 ### What is stubbed, and what that means
 
@@ -444,7 +483,7 @@ comments describe are bugs that actually happened.
 | Transports (organic and paid) | **Stubbed.** `DryRunTransport` and `DryRunPlatform` record calls and return synthetic responses. `LiveTransport.send` raises `NotImplementedError`. |
 | The rubric scorer | **Stubbed.** In production a language model reads each dimension's description and grades the text. `stub_scorer` returns a fixed passing value. |
 | The content generator | **Stubbed.** `TemplateGenerator` is a deterministic offline template. Every string it writes says so in its own text. |
-| Persistence | **In-memory by default.** `SqliteLedger` is real and durable; the snapshot store and post log are in-memory unless given a path. |
+| Persistence | **Mostly in-memory.** `SqliteLedger` is durable and `PostLog` writes fsynced JSONL when given a path. `SnapshotStore` and the loop's pending-draft map are in-memory only: a restart loses them. |
 
 Two notes on honesty, since a stub is exactly where a demo can mislead:
 
@@ -472,25 +511,39 @@ instrument than this loop has.
 Every value an operator might reasonably want to change lives in `config/example/`: the
 rubric and its thresholds, the compliance rules, the style space, the channel list and each
 channel's limits, the learning parameters, the schedule policy, and every paid guardrail.
-None has a meaningful hardcoded default in the engine.
+Changing any of them is a config edit, never a code change.
 
-**Credentials never live in config.** A config field may only reference an environment
-variable as `${UPPER_SNAKE}`. A literal value is *refused*, not warned about, because a
-warning gets scrolled past and a secret in a config file gets committed. This repository
-ships no key and no `.env`.
+Code-level fallbacks do exist for the operational knobs (retry budget, similarity threshold,
+window length), so a partial config still runs. The paid guardrails are the deliberate
+exception: budget, currency, and `decision_metric` have **no** default and a campaign missing
+any of them fails to load. A money ceiling that quietly defaults is not a ceiling.
+
+**Credentials never live in config.** `resolve_env_ref` accepts only an environment
+reference of the form `${UPPER_SNAKE}` and *refuses* a literal, because a warning gets
+scrolled past and a secret in a config file gets committed. It is the helper every credential
+field must be read through; the loader does not scan arbitrary config for secret-looking
+values, since it cannot know which of an operator's fields are meant to be credentials. This
+repository ships no key, no `.env`, and no config field that needs one.
 
 ---
 
 ## Tests
 
-The suite covers the mechanisms above rather than line count: the gate's short-circuit and
-its non-compensable floors, both dedup layers, every approval refusal path plus the ordering
-guarantee that a rejected token is not burned, domain separation, the spend gate's live
-re-check and its all-reasons-at-once refusal, digest determinism and machine independence,
+721 tests, covering the mechanisms above rather than chasing line coverage: the gate's
+short-circuit (proved with a scorer that raises if called) and its non-compensable floors,
+both dedup layers, every approval refusal path plus the ordering guarantee that a rejected
+token is not burned, domain separation, the spend gate's live re-check and its
+all-reasons-at-once refusal, digest determinism and machine independence,
 working-directory-independent creative resolution, restatement resolution and
-missing-is-not-zero, the transition table, the three no-winner states, absent-is-not-zero,
-the property test for exploration coverage, and the honesty tests that mechanically prove the
-dry-run claims.
+missing-is-not-zero, the transition table, the durable intent row and its survival across a
+reload, the three no-winner states and that all three are reachable, absent-is-not-zero, the
+property test for exploration coverage, the full human-approval path including replay and
+wrong-key refusal, and the honesty tests that mechanically prove the dry-run claims.
+
+Three of them are regression guards for bugs found while building this, each of which had
+been invisible in ordinary use: a schedule cap that never fired under an injected clock, an
+inclusive window boundary that would have halved a daily cadence, and an exploration stride
+whose coprimality test never actually constrained anything.
 
 ```bash
 .venv/bin/python -m pytest -v

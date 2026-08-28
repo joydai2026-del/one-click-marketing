@@ -41,6 +41,7 @@ so a skipped or crashed tick does not consume the day's slot.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -91,19 +92,58 @@ class PostLog:
     path: Path | None = None
     _memory: list[dict] = field(default_factory=list)
 
-    def record(self, record: PublishRecord) -> None:
-        entry = {
-            "publish_id": record.publish_id,
-            "channel": record.channel,
-            "external_id": record.external_id,
-            "published_at": record.published_at,
-        }
+    def _append(self, entry: dict) -> None:
         if self.path is None:
             self._memory.append(entry)
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, sort_keys=True) + "\n")
+            # Flushed and fsynced BEFORE the caller makes its network call. An intent row
+            # sitting in a buffer when the process dies is an intent row that never
+            # existed, which is the whole failure this row is meant to make visible.
+            fh.flush()
+            os.fsync(fh.fileno())
+
+    def record_intent(self, draft_id: str, channel: str, *, now: float) -> None:
+        """Write the `posting` marker BEFORE the channel call, and commit it.
+
+        This is what makes a crash unambiguous. A dangling intent row with no matching
+        confirmation means the outcome is UNKNOWN: the post may or may not have landed,
+        and recovery must reconcile against the channel rather than blindly retry.
+        `dangling_intents` finds them.
+        """
+        self._append(
+            {"phase": "posting", "draft_id": draft_id, "channel": channel, "at": now}
+        )
+
+    def record(self, record: PublishRecord) -> None:
+        """Write the confirmed post. Only rows written here count toward the cap."""
+        self._append(
+            {
+                "phase": "published",
+                "publish_id": record.publish_id,
+                "draft_id": record.draft_id,
+                "channel": record.channel,
+                "external_id": record.external_id,
+                "published_at": record.published_at,
+            }
+        )
+
+    def dangling_intents(self) -> list[dict]:
+        """Intent rows with no matching confirmation: the possibly-published set.
+
+        These are exactly the rows a human must look at. Nothing in this codebase retries
+        them, because retrying an unknown outcome is how one post becomes two.
+        """
+        confirmed = {
+            e.get("draft_id") for e in self.entries() if e.get("phase") == "published"
+        }
+        return [
+            e
+            for e in self.entries()
+            if e.get("phase") == "posting" and e.get("draft_id") not in confirmed
+        ]
 
     def entries(self) -> list[dict]:
         if self.path is None:
@@ -130,9 +170,18 @@ class PostLog:
         cutoff = now - window_hours * 3600
         return sum(
             1
-            for e in self.entries()
+            for e in self.confirmed()
             if e.get("channel") == channel and float(e.get("published_at", 0)) > cutoff
         )
+
+    def confirmed(self) -> list[dict]:
+        """Only rows for posts a channel actually acknowledged.
+
+        The cap and the rotation offset both read THIS, never `entries()`. Counting an
+        unconfirmed intent row toward the cap would let a failed publish consume the day's
+        slot, so one channel error would silently cost a day of output.
+        """
+        return [e for e in self.entries() if e.get("phase") == "published"]
 
     def total(self, channel: str | None = None) -> int:
         """Confirmed-post count. Doubles as the durable style rotation offset.
@@ -141,8 +190,8 @@ class PostLog:
         style slot rather than burning it, and a crash-refire replays the same style.
         """
         if channel is None:
-            return len(self.entries())
-        return sum(1 for e in self.entries() if e.get("channel") == channel)
+            return len(self.confirmed())
+        return sum(1 for e in self.confirmed() if e.get("channel") == channel)
 
 
 @dataclass
@@ -210,14 +259,24 @@ class Publisher:
             )
 
         self.phases.append("publishing")
-        # Committed BEFORE the network call. A crash after this point is known to be
-        # possibly-published, so recovery reconciles instead of retrying.
+
+        # Committed and fsynced BEFORE the network call. A crash after this point leaves a
+        # dangling intent row, so recovery KNOWS the outcome is unknown and reconciles
+        # against the channel instead of retrying blindly.
         self.phases.append("posting")
+        self.log.record_intent(
+            draft.draft_id, adapter.name, now=now if now is not None else draft.created_at
+        )
+
         try:
             record = adapter.publish(draft)
         except TimeoutError as exc:
+            # The intent row is deliberately LEFT DANGLING. Removing it here would erase
+            # the only evidence that something may have been published, which is exactly
+            # the ambiguity the row exists to preserve.
             raise IndeterminateOutcome(
-                "the publish outcome is unknown; parked for a human rather than retried"
+                "the publish outcome is unknown; the intent row is left dangling for a "
+                "human to reconcile, and is never auto-retried"
             ) from exc
 
         if not record.external_id:

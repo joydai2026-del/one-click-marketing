@@ -411,3 +411,76 @@ def test_the_campaign_creatives_used_for_the_set_check_come_from_the_campaign(gu
         creatives=(CreativeRef(ref="only.txt", content_hash="a" * 64),),
     )
     assert {c.content_hash for c in campaign.creatives} == {"a" * 64}
+
+
+# --------------------------------------------------------------------------------------
+# flight dates are bound too
+# --------------------------------------------------------------------------------------
+
+
+def test_a_reflighted_campaign_is_refused(campaign, token_and_sig, ledger, live_state, creative_reads):
+    """Flight dates are inside the intent digest, so they are re-checked directly too.
+
+    A campaign silently re-flighted to run for a month instead of a week spends the whole
+    approved ceiling against an audience and a moment nobody reviewed. The digest check
+    would normally catch it, but the digest is a derived value and this is the direct
+    observation of the field itself: if the two ever disagree, this is the one to trust.
+    """
+    with pytest.raises(SpendRefused) as exc:
+        run(
+            campaign,
+            token_and_sig,
+            ledger,
+            live_state,
+            creative_reads,
+            expected_starts_at="2099-01-01T00:00:00+00:00",
+        )
+    assert any("flight start" in r for r in exc.value.reasons)
+
+
+def test_a_shortened_or_extended_end_date_is_refused(
+    campaign, token_and_sig, ledger, live_state, creative_reads
+):
+    with pytest.raises(SpendRefused) as exc:
+        run(
+            campaign,
+            token_and_sig,
+            ledger,
+            live_state,
+            creative_reads,
+            expected_ends_at="2099-12-31T00:00:00+00:00",
+        )
+    assert any("flight end" in r for r in exc.value.reasons)
+
+
+def test_a_matching_flight_window_passes(
+    campaign, token_and_sig, ledger, live_state, creative_reads
+):
+    grant = run(
+        campaign,
+        token_and_sig,
+        ledger,
+        live_state,
+        creative_reads,
+        expected_starts_at=live_state.starts_at,
+        expected_ends_at=live_state.ends_at,
+    )
+    assert grant.platform_campaign_id == PLATFORM_ID
+
+
+def test_both_flight_mismatches_are_reported_together(
+    campaign, token_and_sig, ledger, live_state, creative_reads
+):
+    """All reasons at once. Reporting one at a time turns a two-field problem into two
+    review cycles."""
+    with pytest.raises(SpendRefused) as exc:
+        run(
+            campaign,
+            token_and_sig,
+            ledger,
+            live_state,
+            creative_reads,
+            expected_starts_at="2099-01-01T00:00:00+00:00",
+            expected_ends_at="2099-12-31T00:00:00+00:00",
+        )
+    assert len(exc.value.reasons) >= 2
