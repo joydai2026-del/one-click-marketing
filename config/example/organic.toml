@@ -1,0 +1,96 @@
+# Organic loop configuration. Every value here is meant to be changed without a deploy.
+#
+# NOTHING IN THIS FILE IS REAL. The fact bank, topics, and voice are fabricated placeholder
+# content for a demonstration. They describe an invented product and assert nothing about
+# any real company, person, or result.
+
+[loop]
+# "human" stops before publishing and waits for a signed approval supplied out of band.
+# "auto" may proceed without the human tap, but only for a draft with zero flags, and only
+# when auto_approval_enabled is ALSO true. Both latches ship off.
+gate_mode = "human"
+auto_approval_enabled = false
+
+[schedule]
+# One cap, one place. Counted from a durable log of CONFIRMED posts.
+max_per_window = 1
+window_hours = 24
+
+[bank]
+voice = "plain, specific, no hype"
+topics = [
+  "how the review gate works",
+  "why a duplicate check is not a hash check",
+  "what an approval is actually bound to",
+  "reading a metric that was never measured",
+]
+# The ONLY material a draft may assert. Fabricated for this demo.
+facts = [
+  "the sample pipeline runs six stages per round",
+  "the sample gate scores ten dimensions",
+  "the sample rubric threshold is 3.5 out of 5",
+  "the sample dedup threshold is 0.6 Jaccard similarity",
+]
+
+[style]
+# The space the loop learns over. Add a value to any axis and the exploration schedule
+# recomputes itself; nothing else needs to change.
+[[style.axes]]
+name = "hook"
+values = ["question", "counterintuitive", "concrete-number", "story"]
+
+[[style.axes]]
+name = "angle"
+values = ["how-it-works", "common-mistake", "before-after", "tradeoff", "checklist"]
+
+[[style.axes]]
+name = "format"
+values = ["short-post", "list", "walkthrough"]
+
+[learning]
+# Below min_samples the ranker emits no winner at all. Raising this makes the loop slower
+# to commit and harder to fool; lowering it does the opposite.
+min_samples = 3
+top_k = 2
+bottom_k = 1
+excerpt_chars = 240
+
+[dedup]
+# Jaccard similarity over 5-word shingles, against the published corpus.
+threshold = 0.6
+shingle_k = 5
+
+[compliance]
+# A configurable forbidden-substring compliance floor. The values below are obvious
+# placeholders. In a real deployment this list encodes legal and brand constraints, it is
+# the sensitive artifact in this file, and violations are reported by index rather than by
+# value so the term list does not leak into logs.
+forbidden_terms = ["placeholder-forbidden-term-one", "placeholder-forbidden-term-two"]
+echo_terms = false
+# 0 enforces a no-links policy. Many platforms suppress reach on posts carrying links, and
+# a no-links rule is easier to verify than a link-quality rule.
+max_links = 0
+min_chars = 40
+max_chars = 60000
+required_markers = []
+
+# Channels. Adding one is a config edit plus an adapter class; the orchestrator is untouched.
+[[channels]]
+kind = "long_form"
+name = "substack"
+enabled = true
+require_title = true
+min_body_chars = 200
+max_body_chars = 60000
+# Absolute engagement is the signal here: reach is roughly fixed by the subscriber list.
+engagement_saturation = 100.0
+
+[[channels]]
+kind = "short_form"
+name = "x"
+enabled = true
+max_body_chars = 280
+# Below this many impressions the engagement RATE is noise, so the score is forced to 0
+# rather than flattering an under-delivered post.
+min_impressions_for_signal = 100
+rate_saturation = 0.05

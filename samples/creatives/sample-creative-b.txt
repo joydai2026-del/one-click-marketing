@@ -1,0 +1,7 @@
+[SAMPLE CREATIVE B - FABRICATED PLACEHOLDER]
+
+Second stand-in creative, distinct from A so that a campaign carrying two creatives has two
+different content hashes and the "sorted creative hashes" component of the intent digest is
+actually exercised.
+
+It advertises nothing. It refers to no real product, company, person, or offer.

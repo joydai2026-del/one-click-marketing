@@ -1,0 +1,74 @@
+# The quality rubric. This FILE is the interface: the engine has no built-in idea of what
+# "good" means, and swapping this file swaps the definition of quality without a deploy.
+#
+# Ten generic marketing-content dimensions. A real deployment replaces the descriptions
+# with its own house standard. Three levers are available without touching code:
+#
+#   which dimensions are measured   -> add or remove a [[dimensions]] block
+#   how much each one counts        -> weight
+#   how bad is too bad              -> floor (a non-compensable per-dimension minimum)
+#
+# Scores are 0 to 5. `threshold` is the weighted average required to pass, on the same
+# scale, so "we require an average of 3.5" stays readable.
+#
+# WHY SOME DIMENSIONS HAVE A FLOOR AND MOST DO NOT
+#
+# A weighted average lets a strong dimension compensate for a weak one, which is correct
+# for taste-like qualities: a dull opener is survivable if the substance is excellent. It
+# is NOT correct for correctness. A piece that invents a statistic is not redeemed by being
+# well written, so factual grounding carries a floor and no amount of style clears it.
+
+version = "2026.01-generic"
+threshold = 3.5
+
+[[dimensions]]
+name = "factual_grounding"
+description = "Every claim traces to a supplied fact. A 5 asserts nothing beyond the fact bank. A 0 invents a number, a result, or an attribution."
+weight = 3.0
+floor = 4.0  # non-compensable: an invented claim is not offset by good writing
+
+[[dimensions]]
+name = "clarity"
+description = "A first-time reader understands the point without rereading. A 5 has one idea per sentence and no unexplained jargon."
+weight = 2.0
+
+[[dimensions]]
+name = "specificity"
+description = "Concrete over abstract. A 5 names the thing, the number, the situation. A 1 could be about any product in any industry."
+weight = 2.0
+
+[[dimensions]]
+name = "opening_strength"
+description = "The first sentence earns the second. A 5 gives a reason to keep reading that is not a tease. A 1 opens with throat-clearing."
+weight = 1.5
+
+[[dimensions]]
+name = "audience_fit"
+description = "Written for the people who actually read this channel, at their level, about something they have. A 1 addresses a different reader."
+weight = 1.5
+
+[[dimensions]]
+name = "originality"
+description = "Not a paraphrase of the last piece or of the category's standard post. A 5 says something the reader has not already read this week."
+weight = 1.5
+
+[[dimensions]]
+name = "actionability"
+description = "The reader can do something differently after reading. A 5 leaves a concrete next step. A 1 leaves a feeling."
+weight = 1.0
+
+[[dimensions]]
+name = "tone_consistency"
+description = "Matches the configured voice throughout. A 1 shifts register mid-piece or borrows a tone from a different brand."
+weight = 1.0
+
+[[dimensions]]
+name = "structural_fit"
+description = "Uses the channel's native shape: length, paragraphing, formatting. A 1 is a long-form draft pasted into a short-form field."
+weight = 1.0
+
+[[dimensions]]
+name = "disclosure_and_compliance"
+description = "Required disclosures present and legible; no claim that would need substantiation the fact bank does not provide."
+weight = 2.5
+floor = 4.0  # non-compensable: a missing disclosure is a violation, not a weak spot

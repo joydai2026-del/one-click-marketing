@@ -1,0 +1,10 @@
+[SAMPLE CREATIVE A - FABRICATED PLACEHOLDER]
+
+This file stands in for an ad creative (an image, a video, a rendered card). It is plain
+text so that the repository stays small and so that its content hash is trivially
+reproducible on any machine.
+
+It advertises nothing. It refers to no real product, company, person, or offer.
+
+Its only job is to have stable bytes, so that the spend gate's "re-hash the creative before
+any write" check has something real to verify against.

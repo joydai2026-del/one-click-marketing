@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "one-click-marketing"
+version = "0.1.0"
+description = "A distilled, dependency-light reference implementation of a one-click AI marketing loop: generate, gate, publish, collect, learn, repeat. Organic and paid, with a human approval gate before anything publishes or spends."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "JJ Dong" }]
+keywords = ["marketing-automation", "llm", "human-in-the-loop", "eval-gate", "ads"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Office/Business :: Financial",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "ruff>=0.5"]
+
+[project.scripts]
+ocm = "ocm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
